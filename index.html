@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>Card Hearts</title>
+		<link rel="icon" type="image/png" href="assets/heart-icon.png" />
+		<link rel="stylesheet" href="style.css" />
+	</head>
+	<body>
+		<main class="app-shell">
+			<header class="top-bar" aria-hidden="true">
+				<img class="app-icon" src="assets/heart-icon.png" alt="" />
+				<span class="title">Card Hearts</span>
+			</header>
+
+			<section class="stage-wrap">
+				<canvas id="gameCanvas" aria-label="Hearts game canvas"></canvas>
+			</section>
+
+			<footer class="status-bar">
+				<p>
+					Hover cards to preview selection. On touch devices, tap a card to lift
+					it.
+				</p>
+			</footer>
+		</main>
+
+		<script src="characters.js"></script>
+		<script src="animation.js"></script>
+		<script src="game-logic.js"></script>
+	</body>
+</html>
