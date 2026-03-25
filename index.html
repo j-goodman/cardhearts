@@ -16,17 +16,33 @@
 
 			<section class="stage-wrap">
 				<canvas id="gameCanvas" aria-label="Hearts game canvas"></canvas>
+				<div class="mode-select-overlay" hidden>
+					<div class="mode-select-panel">
+						<p class="mode-select-kicker">Card Hearts</p>
+						<div class="mode-select-actions">
+							<button class="mode-button" type="button" data-target-score="50">
+								<span class="mode-button-title">Short Game</span>
+								<span class="mode-button-subtitle">to 50 points</span>
+							</button>
+							<button class="mode-button" type="button" data-target-score="100">
+								<span class="mode-button-title">Long Game</span>
+								<span class="mode-button-subtitle">to 100 points</span>
+							</button>
+						</div>
+					</div>
+				</div>
+				<div class="game-over-controls" hidden>
+					<button class="overlay-action-button play-again-button" type="button">Play Again?</button>
+					<button class="overlay-action-button switch-mode-button" type="button"></button>
+				</div>
 			</section>
 
-			<footer class="status-bar">
-				<p>
-					Hover cards to preview selection. On touch devices, tap a card to lift
-					it.
-				</p>
-			</footer>
+			<footer class="status-bar"><p></p></footer>
 		</main>
 
 		<script src="characters.js"></script>
+		<script src="deck-info.js"></script>
+		<script src="character-info.js"></script>
 		<script src="animation.js"></script>
 		<script src="game-logic.js"></script>
 	</body>
