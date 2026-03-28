@@ -19,9 +19,9 @@ const FRAME_TOGGLE_SIZE = 22
 const FRAME_DRAG_LIMIT = 200
 const FRAME_SNAP_LIMIT = 150
 const DEFAULT_OPPONENT_FRAMES = [
-	{ playerIndex: 2, x: 0.04, y: 0.31, w: 0.205, h: 0.30 },
-	{ playerIndex: 1, x: 0.36, y: 0.05, w: 0.205, h: 0.30 },
-	{ playerIndex: 3, x: 0.74, y: 0.27, w: 0.205, h: 0.30 }
+	{ playerIndex: 2, x: 0.04, y: 0.31, w: 0.25, h: 0.35 },
+	{ playerIndex: 1, x: 0.36, y: 0.05, w: 0.25, h: 0.35 },
+	{ playerIndex: 3, x: 0.74, y: 0.27, w: 0.25, h: 0.35 }
 ]
 
 const buildOpponentFrames = () => DEFAULT_OPPONENT_FRAMES.map((frame) => ({
