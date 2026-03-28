@@ -1,11 +1,11 @@
-const CHARACTERS = [
+let CHARACTERS = [
     {
         name: "Leonard",
         folder: "leonard",
         personality: {
             reactionSpeed: .7,
             reactionDuration: 1,
-            recklessness: 0,
+            recklessness: .3,
         }
     },
     {
@@ -27,3 +27,15 @@ const CHARACTERS = [
         }
     },
 ]
+
+if (Math.random() > .33) {
+    CHARACTERS[Math.floor(Math.random() * 3)] = {
+        name: "Sunny",
+        folder: "sunny",
+        personality: {
+            reactionSpeed: .3,
+            reactionDuration: .9,
+            recklessness: 0,
+        }
+    }
+}
