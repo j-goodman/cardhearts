@@ -9,24 +9,25 @@
 	</head>
 	<body>
 		<main class="app-shell">
-			<header class="top-bar" aria-hidden="true">
+			<header class="top-bar">
 				<img class="app-icon" src="assets/heart-icon.png" alt="" />
 				<span class="title">Card Hearts</span>
+				<button class="fullscreen-toggle" type="button" aria-label="Enter fullscreen" title="Enter fullscreen">⛶</button>
 			</header>
 
 			<section class="stage-wrap">
 				<canvas id="gameCanvas" aria-label="Hearts game canvas"></canvas>
 				<div class="mode-select-overlay" hidden>
 					<div class="mode-select-panel">
-						<p class="mode-select-kicker">Card Hearts</p>
-						<div class="mode-select-actions">
-							<button class="mode-button" type="button" data-target-score="50">
-								<span class="mode-button-title">Short Game</span>
-								<span class="mode-button-subtitle">to 50 points</span>
+						<h1 class="mode-select-heading">HEARTS</h1>
+						<div class="mode-select-actions" aria-label="Choose game mode">
+							<button class="mode-button mode-choice mode-choice-short" type="button" data-target-score="50" aria-label="Start short game to 50 points">
+								<span class="mode-choice-title">SHORT GAME</span>
+								<span class="mode-choice-subtitle">to 50 points</span>
 							</button>
-							<button class="mode-button" type="button" data-target-score="100">
-								<span class="mode-button-title">Long Game</span>
-								<span class="mode-button-subtitle">to 100 points</span>
+							<button class="mode-button mode-choice mode-choice-long" type="button" data-target-score="100" aria-label="Start long game to 100 points">
+								<span class="mode-choice-title">LONG GAME</span>
+								<span class="mode-choice-subtitle">to 100 points</span>
 							</button>
 						</div>
 					</div>
