@@ -8,12 +8,16 @@ const modeButtons = Array.from(document.querySelectorAll(".mode-button"))
 const gameOverControls = document.querySelector(".game-over-controls")
 const playAgainButton = document.querySelector(".play-again-button")
 const switchModeButton = document.querySelector(".switch-mode-button")
+const appShell = document.querySelector(".app-shell")
+const stageWrap = document.querySelector(".stage-wrap")
+const fullscreenToggle = document.querySelector(".fullscreen-toggle")
 
 const PLAYER_COUNT = 4
 const HUMAN_INDEX = 0
 const PASS_DIRECTIONS = ["left", "right", "center"]
 const SHORT_GAME_SCORE = 50
 const LONG_GAME_SCORE = 100
+const MIN_PORTRAIT_CHANGE_MS = 1200
 const FRAME_TITLE_HEIGHT = 36
 const FRAME_TOGGLE_SIZE = 22
 const FRAME_DRAG_LIMIT = 200
@@ -23,6 +27,17 @@ const DEFAULT_OPPONENT_FRAMES = [
 	{ playerIndex: 1, x: 0.32, y: 0.01, w: 0.25, h: 0.35 },
 	{ playerIndex: 3, x: 0.74, y: 0.26, w: 0.25, h: 0.35 }
 ]
+
+const canvasMetrics = {
+	width: 0,
+	height: 0,
+	dpr: 0
+}
+
+const resizeSync = {
+	rafId: 0,
+	timeoutId: 0
+}
 
 const buildOpponentFrames = () => DEFAULT_OPPONENT_FRAMES.map((frame) => ({
 	...frame,
@@ -60,6 +75,8 @@ const state = {
 	heartsBroken: false,
 	trickNumber: 0,
 	roundNumber: 1,
+	gameNumber: 0,
+	previousOpponentRoster: [],
 	roundInProgress: false,
 	roundRestartAt: 0,
 	actionPauseUntil: 0,
@@ -382,6 +399,8 @@ const resetWindowInteraction = () => {
 const resetGameState = (now = performance.now()) => {
 	hidePlayAgainButton()
 	resetWindowInteraction()
+	createPlayers(now, state.gameNumber)
+	state.gameNumber += 1
 
 	state.gameOver.active = false
 	state.gameOver.ranking = []
@@ -426,14 +445,6 @@ const resetGameState = (now = performance.now()) => {
 	state.handLifts = []
 	state.handFanProgress = 1
 	state.handFanStartAt = 0
-
-	for (const player of state.players) {
-		player.hand = []
-		player.taken = []
-		player.roundPoints = 0
-		player.totalPoints = 0
-		scheduleNextIdle(player, now)
-	}
 }
 
 const startGameWithTargetScore = (targetScore) => {
@@ -493,17 +504,16 @@ const beginGameOver = (now) => {
 	for (let i = 0; i < state.players.length; i += 1) {
 		const player = state.players[i]
 		const rank = rankByPlayer[i]
+		let mood = "default"
 		if (rank === 1) {
-			player.portrait = "laugh"
+			mood = "laugh"
 		} else if (rank === 3) {
-			player.portrait = "frown"
+			mood = "frown"
 		} else if (rank === 4) {
-			player.portrait = "anguish"
-		} else {
-			player.portrait = "default"
+			mood = "anguish"
 		}
-		player.portraitUntil = Number.POSITIVE_INFINITY
 		player.pendingReaction = null
+		setPlayerPortrait(player, mood, now, Number.POSITIVE_INFINITY)
 	}
 
 	setStatus(`Game over at ${state.gameConfig.targetScore} points. Winner: ${state.players[winnerIndex]?.name || "-"}`)
@@ -595,12 +605,64 @@ const loadImage = (src ) => {
 }
 
 const resizeCanvas = ( ) => {
+	state.dpr = Math.max(1, window.devicePixelRatio || 1)
 	const rect = canvas.getBoundingClientRect()
 	const width = Math.floor(rect.width)
 	const height = Math.floor(rect.height)
+	if (width <= 0 || height <= 0) {
+		return
+	}
+	if (width === canvasMetrics.width && height === canvasMetrics.height && state.dpr === canvasMetrics.dpr) {
+		return
+	}
+	canvasMetrics.width = width
+	canvasMetrics.height = height
+	canvasMetrics.dpr = state.dpr
 	canvas.width = Math.floor(width * state.dpr)
 	canvas.height = Math.floor(height * state.dpr)
 	ctx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0)
+}
+
+const updateFullscreenToggle = () => {
+	if (!fullscreenToggle) {
+		return
+	}
+	const isFullscreen = document.fullscreenElement === appShell
+	const label = isFullscreen ? "Exit fullscreen" : "Enter fullscreen"
+	fullscreenToggle.textContent = isFullscreen ? "×" : "⛶"
+	fullscreenToggle.setAttribute("aria-label", label)
+	fullscreenToggle.setAttribute("title", label)
+}
+
+const resizeCanvasAfterLayout = () => {
+	resizeCanvas()
+	if (resizeSync.rafId) {
+		cancelAnimationFrame(resizeSync.rafId)
+	}
+	if (resizeSync.timeoutId) {
+		clearTimeout(resizeSync.timeoutId)
+	}
+	resizeSync.rafId = requestAnimationFrame(() => {
+		resizeSync.rafId = 0
+		resizeCanvas()
+	})
+	resizeSync.timeoutId = setTimeout(() => {
+		resizeSync.timeoutId = 0
+		resizeCanvas()
+	}, 80)
+}
+
+const toggleFullscreen = async () => {
+	if (!appShell || typeof appShell.requestFullscreen !== "function") {
+		return
+	}
+	if (document.fullscreenElement === appShell) {
+		if (document.exitFullscreen) {
+			await document.exitFullscreen()
+		}
+		return
+	}
+	await appShell.requestFullscreen()
 }
 
 const handLayout = (cardCount, fanProgress = 1) => {
@@ -610,10 +672,15 @@ const handLayout = (cardCount, fanProgress = 1) => {
 	const cardW = cardH * 0.72
 	const fullSpread = Math.max(28, Math.min(54, cw * 0.034))
 	const compactSpread = fullSpread * 0.78
-	const spread = compactSpread + (fullSpread - compactSpread) * fanProgress
+	const desiredSpread = compactSpread + (fullSpread - compactSpread) * fanProgress
+	const passSpread = desiredSpread * 1.14
+	const maxSpread = cardCount > 1
+		? Math.max(18, (cw - 24 - cardW) / (cardCount - 1))
+		: desiredSpread
+	const spread = Math.min(state.passPhase.active ? passSpread : desiredSpread, maxSpread)
 	const fanWidth = cardW + spread * (cardCount - 1)
 	const baseX = Math.max(12, (cw - fanWidth) / 2)
-	const baseY = ch - cardH - 14
+	const baseY = ch - cardH
 	const centerIndex = (cardCount - 1) / 2
 	return Array.from({ length: cardCount }, (_, i) => {
 		const t = i - centerIndex
@@ -886,13 +953,56 @@ const seatOriginForPlayer = (playerIndex, cardW, cardH, handIndex) => {
 	}
 	return { x: cw * 0.5 - cardW / 2, y: ch + cardH * 0.8 }}
 
-const scheduleNextIdle = (player, now) => {
-	player.nextIdleAt = now + randomBetween(4500, 10000)
-	player.portraitUntil = 0
-	if (player.portrait !== "default") {
-		player.portrait = "default"
+	const queuePortraitChange = (player, mood, showAt, duration = 0) => {
+		const scheduledAt = Math.max(showAt, player.portraitLockedUntil || 0)
+		const until = duration === Number.POSITIVE_INFINITY ? Number.POSITIVE_INFINITY : scheduledAt + duration
+		player.pendingReaction = { mood, showAt: scheduledAt, until }
+		player.portraitUntil = Math.max(player.portraitUntil || 0, scheduledAt)
+		return scheduledAt
 	}
-}
+
+	const setPlayerPortrait = (player, mood, now, duration = 0) => {
+		if (player.portrait !== mood && now < (player.portraitLockedUntil || 0)) {
+			queuePortraitChange(player, mood, now, duration)
+			return false
+		}
+
+		if (player.portrait !== mood) {
+			player.portrait = mood
+			player.portraitLockedUntil = now + MIN_PORTRAIT_CHANGE_MS
+		}
+
+		player.portraitUntil = duration === Number.POSITIVE_INFINITY ? Number.POSITIVE_INFINITY : now + duration
+		return true
+	}
+
+	const portraitTimingSeed = (player) => {
+		const key = `${player.name}:${player.personality?.reactionSpeed ?? 0.5}:${player.personality?.reactionDuration ?? 0.5}`
+		let seed = 0
+		for (let i = 0; i < key.length; i += 1) {
+			seed = (seed + key.charCodeAt(i) * (i + 1)) % 10007
+		}
+		return seed / 10007
+	}
+
+	const portraitPhaseOffset = (player, spreadMs) => {
+		return Math.round((portraitTimingSeed(player) - 0.5) * spreadMs)
+	}
+
+	const portraitTransitionDelay = (player, minDelay, maxDelay) => {
+		const stableWeight = portraitTimingSeed(player)
+		const blendedWeight = (stableWeight * 0.65) + (Math.random() * 0.35)
+		return Math.round(minDelay + ((maxDelay - minDelay) * blendedWeight))
+	}
+
+	const scheduleNextIdle = (player, now) => {
+		player.nextIdleAt = now + randomBetween(4500, 10000) + portraitPhaseOffset(player, 900) + randomBetween(-260, 260)
+		if (player.portrait !== "default") {
+			queuePortraitChange(player, "default", now + portraitTransitionDelay(player, 90, 420), 0)
+			return
+		}
+		player.portraitUntil = 0
+	}
 
 const pickWinnerPenaltyReaction = (trickPoints, hasQueenOfSpades) => {
 	if (hasQueenOfSpades) {
@@ -938,10 +1048,9 @@ const triggerPenaltyReactions = (winnerIndex, trickPoints, hasQueenOfSpades, now
 			? pickWinnerPenaltyReaction(trickPoints, hasQueenOfSpades)
 			: pickOtherPlayersReaction(trickPoints, hasQueenOfSpades)
 		if (reactionDelay <= 0) {
-			player.portrait = mood
-			player.portraitUntil = now + duration
+			setPlayerPortrait(player, mood, now, duration)
 		} else {
-			player.pendingReaction = { mood, showAt: reactionAt, until: reactionAt + duration }
+			queuePortraitChange(player, mood, reactionAt, duration)
 		}
 		player.nextIdleAt = now + reactionDelay + duration + randomBetween(2500, 5000)
 	}
@@ -957,23 +1066,22 @@ const updatePortraits = (now ) => {
 		for (let i = 0; i < state.players.length; i += 1) {
 			const player = state.players[i]
 			const rank = rankByPlayer[i] || 0
+			let mood = "default"
 			if (rank === 1) {
 				if (now < winnerTauntAt) {
-					player.portrait = "laugh"
+					mood = "laugh"
 				} else if (now < winnerSmileAt) {
-					player.portrait = "taunt"
+					mood = "taunt"
 				} else {
-					player.portrait = "smile"
+					mood = "smile"
 				}
 			} else if (rank === 3) {
-				player.portrait = now < thirdDefaultAt ? "frown" : "default"
+				mood = now < thirdDefaultAt ? "frown" : "default"
 			} else if (rank === 4) {
-				player.portrait = now < loserFrownAt ? "anguish" : "frown"
-			} else {
-				player.portrait = "default"
+				mood = now < loserFrownAt ? "anguish" : "frown"
 			}
-			player.portraitUntil = Number.POSITIVE_INFINITY
 			player.pendingReaction = null
+			setPlayerPortrait(player, mood, now, Number.POSITIVE_INFINITY)
 		}
 		return
 	}
@@ -981,8 +1089,14 @@ const updatePortraits = (now ) => {
 	for (const player of state.players) {
 		// Apply pending delayed reaction now if it's time
 		if (player.pendingReaction && now >= player.pendingReaction.showAt) {
-			player.portrait = player.pendingReaction.mood
-			player.portraitUntil = player.pendingReaction.until
+			setPlayerPortrait(
+				player,
+				player.pendingReaction.mood,
+				now,
+				player.pendingReaction.until === Number.POSITIVE_INFINITY
+					? Number.POSITIVE_INFINITY
+					: Math.max(0, player.pendingReaction.until - player.pendingReaction.showAt)
+			)
 			player.pendingReaction = null
 		}
 
@@ -996,14 +1110,12 @@ const updatePortraits = (now ) => {
 	}
 
 		if (player.portrait === "idle") {
-			player.portrait = "default"
-	scheduleNextIdle(player, now)
+			scheduleNextIdle(player, now)
 	continue
 	}
 
 		if (now >= player.nextIdleAt) {
-			player.portrait = "idle"
-	player.portraitUntil = now + randomBetween(700, 1400)
+			setPlayerPortrait(player, "idle", now, Math.max(MIN_PORTRAIT_CHANGE_MS, randomBetween(700, 1400)))
 	}
 	}
 }
@@ -1412,7 +1524,16 @@ const finalizeDealtRound = (now ) => {
 	player.hand = sortHand(state.pendingRound.hands[i])
 	player.taken = []
 	player.roundPoints = 0
+	player.pendingScoreDelta = 0
+	player.displayedTotalPoints = player.totalPoints
 	scheduleNextIdle(player, now)
+	if (i > 0) {
+		player.armRevealStartAt = now + Math.random() * 1800
+		if (player.armState) {
+			player.armState.reveal = 0
+			player.armState.revealStartAt = player.armRevealStartAt
+		}
+	}
 	}
 
 	state.currentTurn = state.pendingRound.leaderIndex
@@ -1742,7 +1863,7 @@ const resolveTrick = (now ) => {
 	startTrickCollect(winnerIndex, now)
 }
 
-const applyRoundEndExpressions = () => {
+const applyRoundEndExpressions = (now) => {
 	const ranked = state.players
 		.map((player, index) => ({
 			index,
@@ -1764,32 +1885,33 @@ const applyRoundEndExpressions = () => {
 
 	for (let i = 0; i < state.players.length; i += 1) {
 		const player = state.players[i]
-		if (i === bestIndex) {
-			player.portrait = "smile"
-		} else if (i === worstIndex) {
-			player.portrait = "frown"
-		} else {
-			player.portrait = "default"
-		}
-		player.portraitUntil = Number.POSITIVE_INFINITY
 		player.pendingReaction = null
+		if (i === bestIndex) {
+			setPlayerPortrait(player, "smile", now, Number.POSITIVE_INFINITY)
+		} else if (i === worstIndex) {
+			setPlayerPortrait(player, "frown", now, Number.POSITIVE_INFINITY)
+		} else {
+			setPlayerPortrait(player, "default", now, Number.POSITIVE_INFINITY)
+		}
 	}
 }
 
 const finishRound = (now ) => {
 	recalculateRoundPointsFromTaken()
-	applyRoundEndExpressions()
+	applyRoundEndExpressions(now)
 
 	// Shoot the moon: a player who took all 26 points gets 0 — everyone else gets +26
 	const moonShooter = state.players.find((p) => p.roundPoints === 26)
 	if (moonShooter) {
 		for (const player of state.players) {
+			player.pendingScoreDelta = player !== moonShooter ? 26 : 0
 			if (player !== moonShooter) {
 				player.totalPoints += 26
 			}
 		}
 	} else {
 		for (const player of state.players) {
+			player.pendingScoreDelta = player.roundPoints
 			player.totalPoints += player.roundPoints
 		}
 	}
@@ -1884,6 +2006,12 @@ const bindEvents = ( ) => {
 		})
 		button.dataset.bound = "true"
 	}
+	if (fullscreenToggle && !fullscreenToggle.dataset.bound) {
+		fullscreenToggle.addEventListener("click", () => {
+			toggleFullscreen().catch(() => {})
+		})
+		fullscreenToggle.dataset.bound = "true"
+	}
 
 	canvas.addEventListener("mousedown", (event) => {
 		state.pointer.active = true
@@ -1921,7 +2049,18 @@ const bindEvents = ( ) => {
 	updatePointerPosition(touch)
 	handleHumanPlayAttempt()
 	}, { passive: true })
-	window.addEventListener("resize", resizeCanvas)
+	window.addEventListener("resize", resizeCanvasAfterLayout)
+	document.addEventListener("fullscreenchange", () => {
+		updateFullscreenToggle()
+		resizeCanvasAfterLayout()
+	})
+	if (stageWrap && typeof ResizeObserver === "function" && !stageWrap.dataset.resizeObserved) {
+		const resizeObserver = new ResizeObserver(() => {
+			resizeCanvasAfterLayout()
+		})
+		resizeObserver.observe(stageWrap)
+		stageWrap.dataset.resizeObserved = "true"
+	}
 }
 
 const loadCharacterImages = async () => {
@@ -1930,6 +2069,7 @@ const loadCharacterImages = async () => {
 	const loadedByCharacter = await Promise.all(characters.map(async (character) => {
 		const folder = character.folder || "mitch"
 		const loadedMoods = await Promise.all(moods.map(async (mood) => [mood, await loadImage(`assets/characters/${folder}/${mood}.png`)]))
+		loadedMoods.push(["arm", await loadImage(`assets/characters/${folder}/arm.png`)])
 		return [character.name, Object.fromEntries(loadedMoods)]
 	}))
 	state.characterImages = Object.fromEntries(loadedByCharacter)
@@ -1949,6 +2089,11 @@ const loadSuitIcons = async () => {
 
 const loadUiImages = async () => {
 	state.uiImages.rightArrow = await loadImage("assets/right-arrow.png")
+	state.uiImages.smallCard = await loadImage("assets/small-card.png")
+	state.uiImages.firstPlace = await loadImage("assets/first-place.png")
+	state.uiImages.secondPlace = await loadImage("assets/second-place.png")
+	state.uiImages.thirdPlace = await loadImage("assets/third-place.png")
+	state.uiImages.fourthPlace = await loadImage("assets/fourth-place.png")
 }
 
 const loadCardImages = async () => {
@@ -1959,31 +2104,77 @@ const loadCardImages = async () => {
 	state.deck = withImages
 }
 
-const createPlayers = ( ) => {
-	const now = performance.now()
+const createPlayers = (now = performance.now(), gameNumber = state.gameNumber || 0) => {
 	const colorByName = {
-		Ron: "#7d8a63",
+		Leonard: "#6b7d93",
 		Mitch: "#9a6f4f",
-		Deena: "#7a5d71"
+		Deena: "#7a5d71",
+		Sunny: "#b28a46",
+		Terry: "#7c8e63",
+		Val: "#8a5f74"
 	}
-	const computerPlayers = (Array.isArray(CHARACTERS) && CHARACTERS.length === 3 ? CHARACTERS : [
-		{ name: "Ron", folder: "mitch", personality: { reactionSpeed: 0.5, reactionDuration: 0.5, recklessness: 0.5 } },
-		{ name: "Mitch", folder: "mitch", personality: { reactionSpeed: 0.5, reactionDuration: 0.5, recklessness: 0.5 } },
-		{ name: "Deena", folder: "mitch", personality: { reactionSpeed: 0.5, reactionDuration: 0.5, recklessness: 0.5 } }
-	]).map((character) => ({
+	const roster = Array.isArray(CHARACTERS) && CHARACTERS.length >= PLAYER_COUNT - 1
+		? CHARACTERS.slice()
+		: [
+			{ name: "Deena", folder: "deena", roundDelay: 0, personality: { reactionSpeed: 1, reactionDuration: 0.5, recklessness: 0.6 } },
+			{ name: "Leonard", folder: "leonard", roundDelay: 0, personality: { reactionSpeed: 0.7, reactionDuration: 1, recklessness: 0.3 } },
+			{ name: "Mitch", folder: "mitch", roundDelay: 0, personality: { reactionSpeed: 0.9, reactionDuration: 0.3, recklessness: 0.8 } },
+			{ name: "Sunny", folder: "sunny", roundDelay: 0, personality: { reactionSpeed: 0.3, reactionDuration: 0.9, recklessness: 0 } }
+		]
+	const eligibleCharacters = roster.filter((character) => (character.roundDelay || 0) <= gameNumber)
+	const availableCharacters = eligibleCharacters.length >= PLAYER_COUNT - 1
+		? eligibleCharacters
+		: roster.slice().sort((left, right) => (left.roundDelay || 0) - (right.roundDelay || 0))
+	const requiredCharacterNames = gameNumber === 0 ? ["Deena", "Mitch"] : []
+	const requiredNames = new Set(requiredCharacterNames)
+	const requiredCharacters = requiredCharacterNames
+		.map((name) => availableCharacters.find((character) => character.name === name))
+		.filter(Boolean)
+	let selectedCharacters
+	if (requiredCharacters.length > 0) {
+		const otherCharacters = availableCharacters.filter((character) => !requiredNames.has(character.name))
+		selectedCharacters = [
+			...requiredCharacters,
+			...shuffle(otherCharacters).slice(0, PLAYER_COUNT - 1 - requiredCharacters.length)
+		]
+		selectedCharacters = shuffle(selectedCharacters)
+	} else {
+		selectedCharacters = shuffle(availableCharacters).slice(0, PLAYER_COUNT - 1)
+	}
+	const previousRoster = Array.isArray(state.previousOpponentRoster) ? state.previousOpponentRoster.slice().sort() : []
+	const selectedRoster = selectedCharacters.map((character) => character.name).slice().sort()
+	const rosterUnchanged = previousRoster.length === PLAYER_COUNT - 1
+		&& selectedRoster.every((name, index) => name === previousRoster[index])
+	if (rosterUnchanged && availableCharacters.length > PLAYER_COUNT - 1) {
+		const mutableIndices = selectedCharacters
+			.map((character, index) => requiredNames.has(character.name) ? -1 : index)
+			.filter((index) => index >= 0)
+		const alternateCharacters = availableCharacters.filter((character) => !previousRoster.includes(character.name) && !requiredNames.has(character.name))
+		if (alternateCharacters.length > 0 && mutableIndices.length > 0) {
+			selectedCharacters[mutableIndices[mutableIndices.length - 1]] = randomItem(alternateCharacters)
+			selectedCharacters = shuffle(selectedCharacters)
+		}
+	}
+	state.previousOpponentRoster = selectedCharacters.map((character) => character.name).slice().sort()
+	const computerPlayers = selectedCharacters
+		.map((character) => ({
 		name: character.name,
 		color: colorByName[character.name] || "#7d8a63",
 		hand: [],
 		taken: [],
 		roundPoints: 0,
 		totalPoints: 0,
+		displayedTotalPoints: 0,
+		pendingScoreDelta: 0,
 		portrait: "default",
 		portraitUntil: 0,
-		nextIdleAt: now + randomBetween(4500, 9000),
+		portraitLockedUntil: 0,
+		nextIdleAt: now + randomBetween(4500, 9000) + portraitPhaseOffset(character, 900) + randomBetween(-260, 260),
+		pendingReaction: null,
 		personality: character.personality || { reactionSpeed: 0.5, reactionDuration: 0.5, recklessness: 0.5 }
-	}))
+		}))
 	state.players = [
-		{ name: "You", color: "#7d8a63", hand: [], taken: [], roundPoints: 0, totalPoints: 0, portrait: "default", portraitUntil: 0, nextIdleAt: now + randomBetween(4500, 9000) },
+		{ name: "You", color: "#7d8a63", hand: [], taken: [], roundPoints: 0, totalPoints: 0, displayedTotalPoints: 0, pendingScoreDelta: 0, portrait: "default", portraitUntil: 0, portraitLockedUntil: 0, nextIdleAt: now + randomBetween(4500, 9000) + portraitPhaseOffset({ name: "You" }, 900) + randomBetween(-260, 260), pendingReaction: null },
 		...computerPlayers
 	]
 }
@@ -1991,12 +2182,13 @@ const createPlayers = ( ) => {
 const init = async () => {
 	resizeCanvas()
 	bindEvents()
+	updateFullscreenToggle()
 	hidePlayAgainButton()
 	ensurePlayAgainButton()
 	updateSwitchModeButtonLabel()
-	createPlayers()
+	createPlayers(performance.now(), state.gameNumber)
 	state.deck = buildDeck()
-	setStatus("Loading cards and character states...")
+	setStatus("Click either Short Game or Long Game to start.")
 	await Promise.all([
 		loadCardImages(),
 		loadCharacterImages(),
