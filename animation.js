@@ -74,6 +74,228 @@ const reportPerfIfNeeded = (now, frameMs, updateMs, drawMs) => {
 	perfMonitor.slowFrames = 0
 }
 
+const portraitScreenSide = (playerIndex) => {
+	if (typeof playerScreenSide === "function") {
+		return playerScreenSide(playerIndex)
+	}
+	if (playerIndex === 2) {
+		return "left"
+	}
+	if (playerIndex === 3) {
+		return "right"
+	}
+	return "top"
+}
+
+const characterPortraitMetrics = (player, playerIndex, innerX, innerY, innerW, innerH) => {
+	const playerImgs = state.characterImages[player.name] || {}
+	const portrait = playerImgs[player.portrait] || playerImgs.default
+	if (!portrait) {
+		return null
+	}
+
+	const maxImgW = innerW * 0.92
+	const maxImgH = innerH * 0.96
+	const scale = Math.min(maxImgW / portrait.width, maxImgH / portrait.height)
+	const imgW = portrait.width * scale
+	const imgH = portrait.height * scale
+	const portraitShift = innerW * 0.06
+	const side = portraitScreenSide(playerIndex)
+	const offsetX = side === "right" ? portraitShift : (side === "left" ? -portraitShift : 0)
+	const imgX = innerX + (innerW - imgW) / 2 + offsetX
+	const imgY = innerY + innerH - imgH + 1
+
+	return {
+		portrait,
+		side,
+		scale,
+		imgW,
+		imgH,
+		imgX,
+		imgY
+	}
+}
+
+const setCanvasCursor = (cursor) => {
+	if (canvas.style.cursor !== cursor) {
+		canvas.style.cursor = cursor
+	}
+}
+
+const drawCharacterPortrait = (player, playerIndex, innerX, innerY, innerW, innerH, portraitMetrics = null) => {
+	const metrics = portraitMetrics || characterPortraitMetrics(player, playerIndex, innerX, innerY, innerW, innerH)
+	if (!metrics) {
+		return
+	}
+	const { portrait, side, imgW, imgH, imgX, imgY } = metrics
+
+	ctx.imageSmoothingEnabled = false
+	if (side === "right") {
+		ctx.save()
+		ctx.translate(Math.floor(imgX + imgW / 2), 0)
+		ctx.scale(-1, 1)
+		ctx.drawImage(portrait, Math.floor(-imgW / 2), Math.floor(imgY), Math.floor(imgW), Math.floor(imgH))
+		ctx.restore()
+	} else {
+		ctx.drawImage(portrait, Math.floor(imgX), Math.floor(imgY), Math.floor(imgW), Math.floor(imgH))
+	}
+	ctx.imageSmoothingEnabled = true
+}
+
+const randomArmTarget = (rangeX, rangeY, rangeAngle) => ({
+	x: (Math.random() - 0.5) * rangeX,
+	y: -Math.random() * rangeY,
+	angle: (Math.random() - 0.5) * rangeAngle
+})
+
+const ensureOpponentArmState = (player, now) => {
+	if (player.armState) {
+		return player.armState
+	}
+	const idleTarget = randomArmTarget(4, 3, 0.025)
+	const revealStartAt = player.armRevealStartAt || 0
+	const initialReveal = (player.hand?.length || 0) > 0 && now >= revealStartAt ? 1 : 0
+	player.armState = {
+		x: idleTarget.x,
+		y: idleTarget.y,
+		angle: idleTarget.angle,
+		reveal: initialReveal,
+		revealStartAt: revealStartAt,
+		idleX: idleTarget.x,
+		idleY: idleTarget.y,
+		idleAngle: idleTarget.angle,
+		nextIdleAt: now + 2600 + Math.random() * 3400
+	}
+	return player.armState
+}
+
+const updateOpponentArmPoses = (now) => {
+	for (let i = 1; i < state.players.length; i += 1) {
+		const player = state.players[i]
+		if (!player) {
+			continue
+		}
+
+		const armState = ensureOpponentArmState(player, now)
+		const hasCards = (player.hand?.length || 0) > 0
+		if (now >= armState.nextIdleAt) {
+			const idleTarget = randomArmTarget(6, 4, 0.035)
+			armState.idleX = idleTarget.x
+			armState.idleY = idleTarget.y
+			armState.idleAngle = idleTarget.angle
+			armState.nextIdleAt = now + 4200 + Math.random() * 5200
+		}
+
+		let targetX = armState.idleX
+		let targetY = armState.idleY
+		let targetAngle = armState.idleAngle
+		const readyToReveal = hasCards && now >= (armState.revealStartAt || 0)
+		const recklessness = Math.max(0, Math.min(1, player.personality?.recklessness ?? 0.5))
+		const revealUpRate = 0.05 * (0.6 + recklessness * 0.8)
+
+		armState.x += (targetX - armState.x) * 0.08
+		armState.y += (targetY - armState.y) * 0.08
+		armState.angle += (targetAngle - armState.angle) * 0.08
+		armState.reveal += ((readyToReveal ? 1 : 0) - armState.reveal) * (readyToReveal ? revealUpRate : 0.16)
+	}
+}
+
+const drawArmCardFan = (cardCount, cardImage, cardW, cardH, fanOffsetX = 0) => {
+	if (!cardImage || cardCount <= 0) {
+		return
+	}
+
+	const compactFan = cardCount <= 3
+	const spread = compactFan
+		? 0.12 + Math.max(0, cardCount - 1) * 0.03
+		: Math.min(0.95, Math.max(0.24, cardCount * 0.06))
+	const spacing = compactFan ? cardW * 0.78 : cardW * 1.45
+	const arch = compactFan ? cardH * 0.035 : cardH * 0.06
+	for (let i = 0; i < cardCount; i += 1) {
+		const offset = cardCount === 1 ? 0 : i / (cardCount - 1) - 0.5
+		const angle = offset * spread
+		const x = fanOffsetX + offset * spacing
+		const y = -cardH * 0.14 - Math.abs(offset) * arch
+		ctx.save()
+		ctx.translate(x, y)
+		ctx.rotate(angle)
+		ctx.drawImage(cardImage, -cardW / 2, -cardH * 0.96, cardW, cardH)
+		ctx.restore()
+	}
+}
+
+const drawOpponentArm = (player, playerIndex, innerX, innerY, innerW, innerH, portraitMetrics = null) => {
+	const playerImgs = state.characterImages[player.name] || {}
+	const armImage = playerImgs.arm
+	const cardImage = state.uiImages.smallCard
+	if (!armImage || !cardImage) {
+		return
+	}
+
+	const armState = ensureOpponentArmState(player, state.lastNow || performance.now())
+	const metrics = portraitMetrics || characterPortraitMetrics(player, playerIndex, innerX, innerY, innerW, innerH)
+	if (!metrics) {
+		return
+	}
+	const side = metrics.side
+	const baseAngle = 0.15
+	const handX = innerX + innerW * (side === "right" ? 0.35 : 0.65)
+	const handY = innerY + innerH * 0.85
+	const armScale = metrics.scale
+	const armW = armImage.width * armScale
+	const armH = armImage.height * armScale
+	const cardW = Math.min(innerW * 0.12, innerH * 0.15)
+	const cardH = cardW * (cardImage.height / cardImage.width)
+	const fanOffsetX = cardW * 0.22
+	const reveal = Math.max(0, Math.min(1, armState.reveal || 0))
+	if ((player.hand?.length || 0) <= 0 && reveal < 0.02) {
+		return
+	}
+	const stowedAngle = 1.02
+	const drawAngle = stowedAngle + (baseAngle + armState.angle - stowedAngle) * reveal
+	const drawX = handX + armState.x * reveal
+	const drawY = handY + innerH * 0.48 * (1 - reveal) + armState.y * reveal
+
+	ctx.save()
+	ctx.translate(Math.floor(drawX), Math.floor(drawY))
+	if (side === "right") {
+		ctx.scale(-1, 1)
+	}
+	ctx.rotate(drawAngle)
+	drawArmCardFan(player.hand?.length || 0, cardImage, cardW, cardH, fanOffsetX)
+	ctx.imageSmoothingEnabled = false
+	ctx.drawImage(armImage, Math.floor(-armW / 2), Math.floor(-armH / 2), Math.floor(armW), Math.floor(armH))
+	ctx.imageSmoothingEnabled = true
+	ctx.restore()
+}
+
+const resultPortraitForRank = (rank) => {
+	if (rank === 1) return state.uiImages.firstPlace
+	if (rank === 2) return state.uiImages.secondPlace
+	if (rank === 3) return state.uiImages.thirdPlace
+	if (rank === 4) return state.uiImages.fourthPlace
+	return null
+}
+
+const drawResultPortrait = (rank, innerX, innerY, innerW, innerH) => {
+	const portrait = resultPortraitForRank(rank)
+	if (!portrait) {
+		return
+	}
+
+	const maxImgW = innerW * 0.9
+	const maxImgH = innerH * 0.94
+	const scale = Math.min(maxImgW / portrait.width, maxImgH / portrait.height) * 1.5
+	const imgW = portrait.width * scale
+	const imgH = portrait.height * scale
+	const imgX = innerX + (innerW - imgW) / 2
+	const imgY = innerY + (innerH - imgH) / 2
+
+	ctx.imageSmoothingEnabled = false
+	ctx.drawImage(portrait, Math.floor(imgX), Math.floor(imgY), Math.floor(imgW), Math.floor(imgH))
+	ctx.imageSmoothingEnabled = true
+}
+
 const getBackgroundGradient = () => {
 	const width = canvas.clientWidth
 	const height = canvas.clientHeight
@@ -155,6 +377,7 @@ const updateGame = (now ) => {
 	}
 
 	updatePortraits(now)
+	updateOpponentArmPoses(now)
 	updateTableCardAnimations()
 
 	if (state.passTransfer.active) {
@@ -339,35 +562,13 @@ const drawGameOverRanking = () => {
 		ctx.lineTo(innerX + innerW - 0.5, innerY + innerH - 0.5)
 		ctx.stroke()
 
-		ctx.fillStyle = player.color || "#7d8a63"
+		ctx.fillStyle = isHuman && rank === 1 ? "#000000" : (player.color || "#7d8a63")
 		ctx.fillRect(innerX, innerY, innerW, innerH)
 
-		if (!isHuman) {
-			const playerImgs = state.characterImages[player.name] || {}
-			const portrait = playerImgs[player.portrait] || playerImgs.default
-			if (portrait) {
-				const maxImgW = innerW * 0.92
-				const maxImgH = innerH * 0.96
-				const pScale = Math.min(maxImgW / portrait.width, maxImgH / portrait.height)
-				const imgW = portrait.width * pScale
-				const imgH = portrait.height * pScale
-				const portraitShift = innerW * 0.06
-				const offsetX = (player.name === "Ron" || player.name === "Mitch") ? -portraitShift
-					: (player.name === "Deena" ? portraitShift : 0)
-				const imgX = innerX + (innerW - imgW) / 2 + offsetX
-				const imgY = innerY + innerH - imgH
-				ctx.imageSmoothingEnabled = false
-				if (player.name === "Deena") {
-					ctx.save()
-					ctx.translate(Math.floor(imgX + imgW / 2), 0)
-					ctx.scale(-1, 1)
-					ctx.drawImage(portrait, Math.floor(-imgW / 2), Math.floor(imgY), Math.floor(imgW), Math.floor(imgH))
-					ctx.restore()
-				} else {
-					ctx.drawImage(portrait, Math.floor(imgX), Math.floor(imgY), Math.floor(imgW), Math.floor(imgH))
-				}
-				ctx.imageSmoothingEnabled = true
-			}
+		if (isHuman) {
+			drawResultPortrait(rank, innerX, innerY, innerW, innerH)
+		} else {
+			drawCharacterPortrait(player, playerIndex, innerX, innerY, innerW, innerH)
 		}
 
 		ctx.restore()
@@ -500,9 +701,11 @@ const drawOpponentFrames = ( ) => {
 		// Score right-aligned in title bar
 		ctx.textAlign = "right"
 	ctx.fillStyle = "rgba(255, 244, 230, 0.85)"
-	const scoreText = player.roundPoints > 0
-			? `${player.totalPoints} pts  (+${player.roundPoints})`
-			: `${player.totalPoints} pts`
+	const displayedTotal = player.displayedTotalPoints ?? player.totalPoints
+	const displayedDelta = player.roundPoints ?? 0
+	const scoreText = displayedDelta > 0
+			? `${displayedTotal} pts  (+${displayedDelta})`
+			: `${displayedTotal} pts`
 	ctx.fillText(scoreText, frameW - FRAME_TOGGLE_SIZE - 18, titleH / 2)
 	ctx.fillStyle = "rgba(79, 56, 45, 0.95)"
 	ctx.fillRect(toggle.x - x, toggle.y - y, toggle.w, toggle.h)
@@ -535,32 +738,14 @@ const drawOpponentFrames = ( ) => {
 	ctx.fillRect(innerX + 8, innerY + 8, Math.floor(innerW * 0.26), Math.floor(innerH * 0.26))
 	ctx.fillStyle = player.color
 	ctx.fillRect(innerX, innerY, innerW, innerH)
-		const playerImgs = state.characterImages[player.name] || {}
-		const portrait = playerImgs[player.portrait] || playerImgs.default
-	if (portrait) {
-			const maxImgW = innerW * 0.92
-	const maxImgH = innerH * 0.96
-	const scale = Math.min(maxImgW / portrait.width, maxImgH / portrait.height)
-	const imgW = portrait.width * scale
-	const imgH = portrait.height * scale
-	const portraitShift = innerW * 0.06
-	const offsetX = (player.name === "Ron" || player.name === "Mitch")
-				? -portraitShift
-				: (player.name === "Deena" ? portraitShift : 0)
-	const imgX = innerX + (innerW - imgW) / 2 + offsetX
-	const imgY = innerY + innerH - imgH
-	ctx.imageSmoothingEnabled = false
-	if (player.name === "Deena") {
-				ctx.save()
-	ctx.translate(Math.floor(imgX + imgW / 2), 0)
-	ctx.scale(-1, 1)
-	ctx.drawImage(portrait, Math.floor(-imgW / 2), Math.floor(imgY), Math.floor(imgW), Math.floor(imgH))
-	ctx.restore()
-	} else {
-				ctx.drawImage(portrait, Math.floor(imgX), Math.floor(imgY), Math.floor(imgW), Math.floor(imgH))
-	}
-			ctx.imageSmoothingEnabled = true
-	}
+		ctx.save()
+		ctx.beginPath()
+		ctx.rect(innerX, innerY, innerW, innerH)
+		ctx.clip()
+		const portraitMetrics = characterPortraitMetrics(player, frame.playerIndex, innerX, innerY, innerW, innerH)
+		drawCharacterPortrait(player, frame.playerIndex, innerX, innerY, innerW, innerH, portraitMetrics)
+		drawOpponentArm(player, frame.playerIndex, innerX, innerY, innerW, innerH, portraitMetrics)
+		ctx.restore()
 
 		ctx.restore()
 	}
@@ -591,12 +776,12 @@ const drawPlayedCards = ( ) => {
 
 const drawHand = ( ) => {
 	if (state.dealAnimation.active) {
-		canvas.style.cursor = "default"
+		setCanvasCursor("default")
 	return
 	}
 
 	if (state.gameConfig.awaitingModeSelection) {
-		canvas.style.cursor = "default"
+		setCanvasCursor("default")
 		return
 	}
 
@@ -637,23 +822,24 @@ const drawHand = ( ) => {
 	const frameHover = state.pointer.active ? interactiveFrameAtPoint(state.pointer.x, state.pointer.y) : null
 	const isHumanTurn = state.roundInProgress && state.currentTurn === HUMAN_INDEX
 	const isPassing = state.passPhase.active
-	const legalSet = isHumanTurn ? new Set(legalCardIndices(HUMAN_INDEX)) : new Set()
-	const soloLegal = isHumanTurn && legalSet.size === 1
-	const selectedSet = new Set(state.passPhase.humanSelected)
-	const hoveredLegal = (isHumanTurn && state.activeHandIndex >= 0 && legalSet.has(state.activeHandIndex)) || (isPassing && state.activeHandIndex >= 0)
+	const legalIndices = isHumanTurn ? legalCardIndices(HUMAN_INDEX) : []
+	const legalSet = legalIndices.length > 0 ? new Set(legalIndices) : null
+	const soloLegal = legalIndices.length === 1
+	const selectedSet = isPassing && state.passPhase.humanSelected.length > 0 ? new Set(state.passPhase.humanSelected) : null
+	const hoveredLegal = (isHumanTurn && state.activeHandIndex >= 0 && legalSet?.has(state.activeHandIndex)) || (isPassing && state.activeHandIndex >= 0)
 	if (state.windowInteraction.dragPlayerIndex >= 0) {
-		canvas.style.cursor = "grabbing"
+		setCanvasCursor("grabbing")
 	} else if (frameHover?.isToggle) {
-		canvas.style.cursor = "pointer"
+		setCanvasCursor("pointer")
 	} else if (frameHover) {
-		canvas.style.cursor = "grab"
+		setCanvasCursor("grab")
 	} else {
-		canvas.style.cursor = hoveredLegal ? "pointer" : "default"
+		setCanvasCursor(hoveredLegal ? "pointer" : "default")
 	}
 	for (let i = 0; i < visualLayout.length; i += 1) {
 		const isHovered = i === state.activeHandIndex
-	const isSelectedForPass = isPassing && selectedSet.has(i)
-	const isSoloCard = soloLegal && legalSet.has(i)
+	const isSelectedForPass = isPassing && selectedSet?.has(i)
+	const isSoloCard = soloLegal && legalSet?.has(i)
 	let targetLift = 0
 	if (isPassing) {
 			targetLift = isSelectedForPass ? 28 : (isHovered ? 14 : 0)
@@ -661,7 +847,7 @@ const drawHand = ( ) => {
 			if (isSoloCard) {
 				targetLift = isHovered ? 36 : 18
 	} else {
-				targetLift = isHovered ? (legalSet.has(i) ? 36 : 8) : 0
+				targetLift = isHovered ? (legalSet?.has(i) ? 36 : 8) : 0
 	}
 		}
 		state.handLifts[i] += (targetLift - state.handLifts[i]) * 0.11
@@ -806,9 +992,11 @@ const drawYouLabel = ( ) => {
 	ctx.fillText("You", nameX + namePadX, nameY + namePadY + nameFontSize / 2)
 	ctx.textAlign = "right"
 	ctx.fillStyle = "rgba(255, 244, 230, 0.85)"
-	const scoreText = humanPlayer.roundPoints > 0
-		? `${humanPlayer.totalPoints} pts  (+${humanPlayer.roundPoints})`
-		: `${humanPlayer.totalPoints} pts`
+	const displayedTotal = humanPlayer.displayedTotalPoints ?? humanPlayer.totalPoints
+	const displayedDelta = humanPlayer.roundPoints ?? 0
+	const scoreText = displayedDelta > 0
+		? `${displayedTotal} pts  (+${displayedDelta})`
+		: `${displayedTotal} pts`
 	ctx.fillText(scoreText, barW - 10, titleH / 2)
 	ctx.textAlign = "left"
 	ctx.textBaseline = "alphabetic"
@@ -948,6 +1136,15 @@ const render = (now = 0) => {
 	ctx.fillRect(0, 0, canvas.clientWidth, canvas.clientHeight)
 	const drawStart = performance.now()
 
+	if (state.gameConfig.awaitingModeSelection) {
+		drawTable()
+		const drawEnd = performance.now()
+		reportPerfIfNeeded(now, drawEnd - frameStart, updateEnd - updateStart, drawEnd - drawStart)
+		state.lastNow = now
+		requestAnimationFrame(render)
+		return
+	}
+
 	if (state.gameOver?.active) {
 		drawGameOverRanking()
 		const drawEnd = performance.now()
@@ -963,8 +1160,8 @@ const render = (now = 0) => {
 	drawPassTransfer(now)
 	drawSuitIcons()
 	drawOpponentFrames()
-	drawYouLabel()
 	drawHand()
+	drawYouLabel()
 	drawPassPrompt()
 	drawHeartsBrokenOverlay(now)
 	const drawEnd = performance.now()
