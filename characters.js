@@ -44,6 +44,17 @@ const CHARACTERS = [
 		}
 	},
 	{
+		name: "Ron",
+		folder: "ron",
+        roundDelay: 0,
+		personality: {
+            favoredSuit: "spades",
+			reactionSpeed: 0.8,
+			reactionDuration: 0.8,
+			recklessness: 0.8
+		}
+	},
+	{
 		name: "Terry",
 		folder: "terry",
         roundDelay: 2,
