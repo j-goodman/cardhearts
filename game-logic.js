@@ -28,6 +28,22 @@ const DEFAULT_OPPONENT_FRAMES = [
 	{ playerIndex: 3, x: 0.74, y: 0.26, w: 0.25, h: 0.35 }
 ]
 
+const OPPONENT_COLOR_BY_NAME = {
+	Leonard: "#6b7d93",
+	Mitch: "#9a6f4f",
+	Deena: "#7a5d71",
+	Sunny: "#b28a46",
+	Terry: "#7c8e63",
+	Val: "#8a5f74"
+}
+
+const FALLBACK_CHARACTER_ROSTER = [
+	{ name: "Deena", folder: "deena", roundDelay: 0, personality: { reactionSpeed: 1, reactionDuration: 0.5, recklessness: 0.6 } },
+	{ name: "Leonard", folder: "leonard", roundDelay: 0, personality: { reactionSpeed: 0.7, reactionDuration: 1, recklessness: 0.3 } },
+	{ name: "Mitch", folder: "mitch", roundDelay: 0, personality: { reactionSpeed: 0.9, reactionDuration: 0.3, recklessness: 0.8 } },
+	{ name: "Sunny", folder: "sunny", roundDelay: 0, personality: { reactionSpeed: 0.3, reactionDuration: 0.9, recklessness: 0 } }
+]
+
 const canvasMetrics = {
 	width: 0,
 	height: 0,
@@ -77,6 +93,8 @@ const state = {
 	roundNumber: 1,
 	gameNumber: 0,
 	previousOpponentRoster: [],
+	opponentAppearanceStreaks: {},
+	lastGameWinningComputerName: null,
 	roundInProgress: false,
 	roundRestartAt: 0,
 	actionPauseUntil: 0,
@@ -518,6 +536,8 @@ const beginGameOver = (now) => {
 
 	setStatus(`Game over at ${state.gameConfig.targetScore} points. Winner: ${state.players[winnerIndex]?.name || "-"}`)
 	showPlayAgainButton()
+	state.completedGameCount += 1
+	state.lastGameWinningComputerName = winnerIndex > HUMAN_INDEX ? state.players[winnerIndex]?.name || null : null
 }
 
 const restartGameAfterGameOver = () => {
@@ -558,6 +578,113 @@ const randomBetween = (min, max) => {
 
 const randomItem = (list ) => {
 	return list[Math.floor(Math.random() * list.length)]
+}
+
+const baseCharacterRoster = () => {
+	if (Array.isArray(CHARACTERS) && CHARACTERS.length >= PLAYER_COUNT - 1) {
+		return CHARACTERS.slice()
+	}
+	return FALLBACK_CHARACTER_ROSTER.slice()
+}
+
+const availableCharactersForGame = (gameNumber = 0) => {
+	const roster = baseCharacterRoster()
+	const eligibleCharacters = roster.filter((character) => (character.roundDelay || 0) <= gameNumber)
+	if (eligibleCharacters.length >= PLAYER_COUNT - 1) {
+		return eligibleCharacters
+	}
+	return roster.slice().sort((left, right) => (left.roundDelay || 0) - (right.roundDelay || 0))
+}
+
+const sortedCharacterNames = (characters) => characters.map((character) => character.name).slice().sort()
+
+const buildBasePlayer = (name, color, now, personality = null) => ({
+	name,
+	color,
+	hand: [],
+	taken: [],
+	roundPoints: 0,
+	totalPoints: 0,
+	displayedTotalPoints: 0,
+	pendingScoreDelta: 0,
+	portrait: "default",
+	portraitUntil: 0,
+	portraitLockedUntil: 0,
+	nextIdleAt: now + randomBetween(4500, 9000) + portraitPhaseOffset({ name, personality }, 900) + randomBetween(-260, 260),
+	pendingReaction: null,
+	...(personality ? { personality } : {})
+})
+
+const buildComputerPlayer = (character, now) => buildBasePlayer(
+	character.name,
+	OPPONENT_COLOR_BY_NAME[character.name] || "#7d8a63",
+	now,
+	character.personality || { reactionSpeed: 0.5, reactionDuration: 0.5, recklessness: 0.5 }
+)
+
+const buildHumanPlayer = (now) => buildBasePlayer("You", "#7d8a63", now)
+
+const updateOpponentRosterTracking = (selectedCharacters) => {
+	const previousStreaks = state.opponentAppearanceStreaks || {}
+	state.previousOpponentRoster = sortedCharacterNames(selectedCharacters)
+	state.opponentAppearanceStreaks = Object.fromEntries(
+		selectedCharacters.map((character) => [
+			character.name,
+			(previousStreaks[character.name] || 0) + 1
+		])
+	)
+}
+
+const selectComputerCharactersForNewGame = (gameNumber = 0) => {
+	const availableCharacters = availableCharactersForGame(gameNumber)
+	const requiredCharacterNames = gameNumber === 0 ? ["Deena", "Mitch"] : []
+	const requiredNames = new Set(requiredCharacterNames)
+	const overLimitNames = new Set(
+		state.previousOpponentRoster.length > 0
+			? availableCharacters
+				.filter((character) => {
+					const streak = state.opponentAppearanceStreaks?.[character.name] || 0
+					return streak >= 2 && character.name !== state.lastGameWinningComputerName
+				})
+				.map((character) => character.name)
+			: []
+	)
+	const preferredCharacters = availableCharacters.filter((character) => !overLimitNames.has(character.name))
+	const selectionPool = preferredCharacters.length >= PLAYER_COUNT - 1
+		? preferredCharacters
+		: availableCharacters
+	const requiredCharacters = requiredCharacterNames
+		.map((name) => selectionPool.find((character) => character.name === name) || availableCharacters.find((character) => character.name === name))
+		.filter(Boolean)
+
+	let selectedCharacters
+	if (requiredCharacters.length > 0) {
+		const otherCharacters = selectionPool.filter((character) => !requiredNames.has(character.name))
+		selectedCharacters = [
+			...requiredCharacters,
+			...shuffle(otherCharacters.slice()).slice(0, PLAYER_COUNT - 1 - requiredCharacters.length)
+		]
+		selectedCharacters = shuffle(selectedCharacters)
+	} else {
+		selectedCharacters = shuffle(selectionPool.slice()).slice(0, PLAYER_COUNT - 1)
+	}
+
+	const previousRoster = Array.isArray(state.previousOpponentRoster) ? state.previousOpponentRoster.slice().sort() : []
+	const selectedRoster = sortedCharacterNames(selectedCharacters)
+	const rosterUnchanged = previousRoster.length === PLAYER_COUNT - 1
+		&& selectedRoster.every((name, index) => name === previousRoster[index])
+	if (rosterUnchanged && selectionPool.length > PLAYER_COUNT - 1) {
+		const mutableIndices = selectedCharacters
+			.map((character, index) => requiredNames.has(character.name) ? -1 : index)
+			.filter((index) => index >= 0)
+		const alternateCharacters = selectionPool.filter((character) => !previousRoster.includes(character.name) && !requiredNames.has(character.name))
+		if (alternateCharacters.length > 0 && mutableIndices.length > 0) {
+			selectedCharacters[mutableIndices[mutableIndices.length - 1]] = randomItem(alternateCharacters)
+			selectedCharacters = shuffle(selectedCharacters)
+		}
+	}
+
+	return selectedCharacters
 }
 
 const buildDeck = ( ) => {
@@ -1267,6 +1394,7 @@ const chooseComputerPassIndices = (playerIndex ) => {
 	const player = state.players[playerIndex]
 	const hand = player.hand
 	const styleRecklessness = player.personality?.recklessness ?? 0.5
+	const favoredSuit = player.personality?.favoredSuit || null
 	if (!hand || hand.length < 3) {
 		return hand.map((_, i) => i)
 	}
@@ -1301,9 +1429,15 @@ const chooseComputerPassIndices = (playerIndex ) => {
 				let selectedSpades = 0
 				let selectedQueen = false
 				let selectedPenaltyPoints = 0
+				let selectedFavoredSuitCards = 0
+				let selectedFavoredRankSum = 0
 
 				for (const card of selected) {
 					afterCounts[card.suit] -= 1
+					if (favoredSuit && card.suit === favoredSuit) {
+						selectedFavoredSuitCards += 1
+						selectedFavoredRankSum += RANK_VALUE[card.rank]
+					}
 					if (card.suit === "hearts") {
 						selectedHearts += 1
 						selectedPenaltyPoints += 1
@@ -1325,6 +1459,10 @@ const chooseComputerPassIndices = (playerIndex ) => {
 				const spadesAfterExcludingQueen = Math.max(0, afterCounts.spades - (retainedQueen ? 1 : 0))
 				const hasGoodQueenCoverAfter = spadesAfterExcludingQueen >= 4
 				const selectedRankSum = selected.reduce((sum, card) => sum + RANK_VALUE[card.rank], 0)
+				const favoredSuitBefore = favoredSuit ? suitCounts[favoredSuit] || 0 : 0
+				const favoredSuitAfter = favoredSuit ? afterCounts[favoredSuit] || 0 : 0
+				const voidedFavoredSuit = Boolean(favoredSuit && favoredSuitBefore > 0 && favoredSuitAfter === 0)
+				const nearVoidedFavoredSuit = Boolean(favoredSuit && favoredSuitBefore > 1 && favoredSuitAfter === 1)
 
 				let voidsCreated = 0
 				let nearVoidsCreated = 0
@@ -1335,6 +1473,12 @@ const chooseComputerPassIndices = (playerIndex ) => {
 						nearVoidsCreated += 1
 					}
 				}
+				const nonFavoredVoidsCreated = favoredSuit
+					? SUITS.filter((suit) => suit !== favoredSuit && suitCounts[suit] > 0 && afterCounts[suit] === 0).length
+					: voidsCreated
+				const nonFavoredNearVoidsCreated = favoredSuit
+					? SUITS.filter((suit) => suit !== favoredSuit && suitCounts[suit] > 1 && afterCounts[suit] === 1).length
+					: nearVoidsCreated
 
 				const maxSelectedInOneSuit = Math.max(
 					selected.filter((card) => card.suit === "clubs").length,
@@ -1370,6 +1514,28 @@ const chooseComputerPassIndices = (playerIndex ) => {
 					comboScore += selectedSpades * 45
 					if (!hasGoodQueenCoverAfter) {
 						comboScore -= 260
+					}
+				}
+
+				if (favoredSuit === "hearts") {
+					const retainedHearts = heartsInHand - selectedHearts
+					comboScore -= selectedHearts * 240
+					comboScore -= selectedHighHearts * 35
+					comboScore += retainedHearts * 52
+					comboScore += nonFavoredVoidsCreated * 145 + nonFavoredNearVoidsCreated * 52
+					if (voidedFavoredSuit) {
+						comboScore -= 520
+					} else if (nearVoidedFavoredSuit) {
+						comboScore -= 170
+					}
+				} else if (favoredSuit) {
+					comboScore -= selectedFavoredSuitCards * 110
+					comboScore -= selectedFavoredRankSum * 4
+					comboScore += nonFavoredVoidsCreated * 80 + nonFavoredNearVoidsCreated * 28
+					if (voidedFavoredSuit) {
+						comboScore -= 360
+					} else if (nearVoidedFavoredSuit) {
+						comboScore -= 120
 					}
 				}
 
@@ -1584,6 +1750,7 @@ const chooseComputerCardIndex = (playerIndex ) => {
 	}
 
 	const styleRecklessness = player.personality?.recklessness ?? 0.5
+	const favoredSuit = player.personality?.favoredSuit || null
 	const strategyRecklessness = 0.5
 
 	// Determine if we are following suit or leading
@@ -1626,6 +1793,11 @@ const chooseComputerCardIndex = (playerIndex ) => {
 		const penalty = cardPoints(card)
 		const isQueenOfSpades = card.suit === "spades" && card.rank === "Q"
 		const suitLen = suitCounts[card.suit] || 1
+		const rankValue = RANK_VALUE[card.rank]
+		const isFavoredSuit = Boolean(favoredSuit && card.suit === favoredSuit)
+		const preferredVoidWeight = favoredSuit === "hearts"
+			? (card.suit === "hearts" ? 0.35 : 1.55)
+			: (isFavoredSuit ? 0.4 : 1.18)
 
 		if (pursuingMoon) {
 			// Moon mode: aggressively collect penalty cards
@@ -1665,9 +1837,16 @@ const chooseComputerCardIndex = (playerIndex ) => {
 					score += (1 - strategyRecklessness) * 200 - strategyRecklessness * 80
 				}
 				// Cautious players prefer low-rank safe leads
-				score += (1 - strategyRecklessness) * RANK_VALUE[card.rank] * 4
+				score += (1 - strategyRecklessness) * rankValue * 4
 				// Void creation: lead from the shortest suit to exhaust it faster
-				score -= voidPressure * (5 - Math.min(suitLen, 5)) * 18
+				score -= voidPressure * (5 - Math.min(suitLen, 5)) * 18 * preferredVoidWeight
+				if (favoredSuit === "hearts") {
+					if (card.suit === "hearts" && state.heartsBroken) {
+						score -= 28 + heartsInHand * 4
+					}
+				} else if (isFavoredSuit) {
+					score -= 55 + rankValue * 1.8
+				}
 				if (!queenSpadesPlayed && card.suit === "spades" && (card.rank === "K" || card.rank === "A")) {
 					// Before Q is played, avoid leading K/A of spades and risking taking Q.
 					score += 280 + (1 - strategyRecklessness) * 220
@@ -1679,7 +1858,7 @@ const chooseComputerCardIndex = (playerIndex ) => {
 			} else {
 				// Following suit
 				if (card.suit === leadSuit) {
-					const wouldWin = RANK_VALUE[card.rank] > highestLeadRank
+					const wouldWin = rankValue > highestLeadRank
 					if (isQueenOfSpades && !queenSpadesPlayed) {
 						const safeNow = highestLeadRank > RANK_VALUE["Q"]
 						// Dump Q aggressively, especially when a higher spade is already in the trick.
@@ -1697,12 +1876,24 @@ const chooseComputerCardIndex = (playerIndex ) => {
 
 					if (wouldWin && !trickHasPoints) {
 						// Winning a clean trick: cautious players still mildly prefer not to lead high
-						score += (1 - strategyRecklessness) * RANK_VALUE[card.rank] * 3
+						score += (1 - strategyRecklessness) * rankValue * 3
 					}
 
 					if (!wouldWin) {
 						// Safe to play high — reckless players prefer to dump high cards here
-						score -= strategyRecklessness * RANK_VALUE[card.rank] * 3
+						score -= strategyRecklessness * rankValue * 3
+					}
+
+					if (favoredSuit === "hearts") {
+						if (card.suit === "hearts" && !wouldWin) {
+							score -= 24 + rankValue * 1.5
+						}
+					} else if (isFavoredSuit) {
+						if (!trickHasPoints) {
+							score -= 42 + strategyRecklessness * rankValue * 2
+						} else if (!wouldWin) {
+							score -= 16 + strategyRecklessness * rankValue
+						}
 					}
 
 					if (!queenSpadesPlayed && leadSuit === "spades" && (card.rank === "K" || card.rank === "A") && wouldWin && playersAfter > 0) {
@@ -1719,12 +1910,23 @@ const chooseComputerCardIndex = (playerIndex ) => {
 					}
 					if (card.suit === "hearts") {
 						score -= 320
-						score -= RANK_VALUE[card.rank] * 8
+						score -= rankValue * 8
 					}
 					score -= strategyRecklessness * penalty * 60
-					score += (1 - strategyRecklessness) * RANK_VALUE[card.rank] * 2
+					score += (1 - strategyRecklessness) * rankValue * 2
 					// Void creation: prefer discarding from suits closest to being voided
-					score -= voidPressure * (4 - Math.min(suitLen, 4)) * 15
+					score -= voidPressure * (4 - Math.min(suitLen, 4)) * 15 * preferredVoidWeight
+					if (favoredSuit === "hearts") {
+						if (card.suit === "hearts") {
+							score -= 220 + rankValue * 7
+						} else {
+							score += 55
+						}
+					} else if (isFavoredSuit) {
+						score += 110 + rankValue * 5
+					} else if (favoredSuit) {
+						score -= 24 + (4 - Math.min(suitLen, 4)) * 8
+					}
 					if (queenInHand && !queenSpadesPlayed && card.suit === "spades" && !isQueenOfSpades) {
 						// Keep some spades around while still holding Q to reduce forced high-spade plays.
 						score += 80
@@ -1733,7 +1935,6 @@ const chooseComputerCardIndex = (playerIndex ) => {
 			}
 
 			// Personality only influences equally scored objective choices.
-			const rankValue = RANK_VALUE[card.rank]
 			const styleLean = styleRecklessness - 0.5
 			if (isLeading) {
 				tieScore += styleLean * rankValue * 3
@@ -1747,6 +1948,13 @@ const chooseComputerCardIndex = (playerIndex ) => {
 			}
 			if (isQueenOfSpades) {
 				tieScore += styleLean * 22
+			}
+			if (favoredSuit === "hearts") {
+				if (card.suit === "hearts") {
+					tieScore -= rankValue * 2
+				}
+			} else if (isFavoredSuit) {
+				tieScore -= rankValue * 1.5
 			}
 		}
 
@@ -2104,77 +2312,14 @@ const loadCardImages = async () => {
 	state.deck = withImages
 }
 
-const createPlayers = (now = performance.now(), gameNumber = state.gameNumber || 0) => {
-	const colorByName = {
-		Leonard: "#6b7d93",
-		Mitch: "#9a6f4f",
-		Deena: "#7a5d71",
-		Sunny: "#b28a46",
-		Terry: "#7c8e63",
-		Val: "#8a5f74"
+const createPlayers = (now = performance.now(), gameNumber = state.gameNumber || 0, trackRoster = true) => {
+	const selectedCharacters = selectComputerCharactersForNewGame(gameNumber)
+	if (trackRoster) {
+		updateOpponentRosterTracking(selectedCharacters)
 	}
-	const roster = Array.isArray(CHARACTERS) && CHARACTERS.length >= PLAYER_COUNT - 1
-		? CHARACTERS.slice()
-		: [
-			{ name: "Deena", folder: "deena", roundDelay: 0, personality: { reactionSpeed: 1, reactionDuration: 0.5, recklessness: 0.6 } },
-			{ name: "Leonard", folder: "leonard", roundDelay: 0, personality: { reactionSpeed: 0.7, reactionDuration: 1, recklessness: 0.3 } },
-			{ name: "Mitch", folder: "mitch", roundDelay: 0, personality: { reactionSpeed: 0.9, reactionDuration: 0.3, recklessness: 0.8 } },
-			{ name: "Sunny", folder: "sunny", roundDelay: 0, personality: { reactionSpeed: 0.3, reactionDuration: 0.9, recklessness: 0 } }
-		]
-	const eligibleCharacters = roster.filter((character) => (character.roundDelay || 0) <= gameNumber)
-	const availableCharacters = eligibleCharacters.length >= PLAYER_COUNT - 1
-		? eligibleCharacters
-		: roster.slice().sort((left, right) => (left.roundDelay || 0) - (right.roundDelay || 0))
-	const requiredCharacterNames = gameNumber === 0 ? ["Deena", "Mitch"] : []
-	const requiredNames = new Set(requiredCharacterNames)
-	const requiredCharacters = requiredCharacterNames
-		.map((name) => availableCharacters.find((character) => character.name === name))
-		.filter(Boolean)
-	let selectedCharacters
-	if (requiredCharacters.length > 0) {
-		const otherCharacters = availableCharacters.filter((character) => !requiredNames.has(character.name))
-		selectedCharacters = [
-			...requiredCharacters,
-			...shuffle(otherCharacters).slice(0, PLAYER_COUNT - 1 - requiredCharacters.length)
-		]
-		selectedCharacters = shuffle(selectedCharacters)
-	} else {
-		selectedCharacters = shuffle(availableCharacters).slice(0, PLAYER_COUNT - 1)
-	}
-	const previousRoster = Array.isArray(state.previousOpponentRoster) ? state.previousOpponentRoster.slice().sort() : []
-	const selectedRoster = selectedCharacters.map((character) => character.name).slice().sort()
-	const rosterUnchanged = previousRoster.length === PLAYER_COUNT - 1
-		&& selectedRoster.every((name, index) => name === previousRoster[index])
-	if (rosterUnchanged && availableCharacters.length > PLAYER_COUNT - 1) {
-		const mutableIndices = selectedCharacters
-			.map((character, index) => requiredNames.has(character.name) ? -1 : index)
-			.filter((index) => index >= 0)
-		const alternateCharacters = availableCharacters.filter((character) => !previousRoster.includes(character.name) && !requiredNames.has(character.name))
-		if (alternateCharacters.length > 0 && mutableIndices.length > 0) {
-			selectedCharacters[mutableIndices[mutableIndices.length - 1]] = randomItem(alternateCharacters)
-			selectedCharacters = shuffle(selectedCharacters)
-		}
-	}
-	state.previousOpponentRoster = selectedCharacters.map((character) => character.name).slice().sort()
-	const computerPlayers = selectedCharacters
-		.map((character) => ({
-		name: character.name,
-		color: colorByName[character.name] || "#7d8a63",
-		hand: [],
-		taken: [],
-		roundPoints: 0,
-		totalPoints: 0,
-		displayedTotalPoints: 0,
-		pendingScoreDelta: 0,
-		portrait: "default",
-		portraitUntil: 0,
-		portraitLockedUntil: 0,
-		nextIdleAt: now + randomBetween(4500, 9000) + portraitPhaseOffset(character, 900) + randomBetween(-260, 260),
-		pendingReaction: null,
-		personality: character.personality || { reactionSpeed: 0.5, reactionDuration: 0.5, recklessness: 0.5 }
-		}))
+	const computerPlayers = selectedCharacters.map((character) => buildComputerPlayer(character, now))
 	state.players = [
-		{ name: "You", color: "#7d8a63", hand: [], taken: [], roundPoints: 0, totalPoints: 0, displayedTotalPoints: 0, pendingScoreDelta: 0, portrait: "default", portraitUntil: 0, portraitLockedUntil: 0, nextIdleAt: now + randomBetween(4500, 9000) + portraitPhaseOffset({ name: "You" }, 900) + randomBetween(-260, 260), pendingReaction: null },
+		buildHumanPlayer(now),
 		...computerPlayers
 	]
 }
@@ -2186,7 +2331,7 @@ const init = async () => {
 	hidePlayAgainButton()
 	ensurePlayAgainButton()
 	updateSwitchModeButtonLabel()
-	createPlayers(performance.now(), state.gameNumber)
+	createPlayers(performance.now(), state.gameNumber, false)
 	state.deck = buildDeck()
 	setStatus("Click either Short Game or Long Game to start.")
 	await Promise.all([

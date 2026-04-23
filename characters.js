@@ -68,12 +68,23 @@ const CHARACTERS = [
     {
 		name: "Val",
 		folder: "val",
-        roundDelay: 1,
+        roundDelay: 2,
 		personality: {
             favoredSuit: "spades",
 			reactionSpeed: 0.8,
 			reactionDuration: 0.6,
 			recklessness: 1
+		}
+	},
+	{
+		name: "Pauline",
+		folder: "pauline",
+        roundDelay: 1,
+		personality: {
+            favoredSuit: "clubs",
+			reactionSpeed: .8,
+			reactionDuration: 0.7,
+			recklessness: 0.3
 		}
 	},
 ]
