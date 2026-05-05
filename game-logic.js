@@ -73,6 +73,14 @@ const state = {
 	handLifts: [],
 	handVisualById: {},
 	handVisualLayout: [],
+	humanHandRevision: 0,
+	passSelectionRevision: 0,
+	handInteractionCache: {
+		key: "",
+		legalMask: null,
+		selectedMask: null,
+		soloLegal: false
+	},
 	handFanProgress: 1,
 	handFanStartAt: 0,
 	handFanDuration: Math.round(380 * CARD_ANIMATION_DURATION_SCALE),
@@ -106,6 +114,7 @@ const state = {
 	trickCollectDoneAt: 0,
 	lastNow: 0,
 	status: "",
+	brandingIconPath: "assets/heart-icon.png",
 	pendingRound: null,
 	gameConfig: {
 		targetScore: SHORT_GAME_SCORE,
@@ -560,6 +569,9 @@ const switchGameModeAfterGameOver = () => {
 	restartGameAfterGameOver()
 }
 const setStatus = (text ) => {
+	if (state.status === text) {
+		return
+	}
 	state.status = text
 	if (statusText) {
 		statusText.textContent = text
@@ -568,10 +580,14 @@ const setStatus = (text ) => {
 
 const updateHeartBranding = ( ) => {
 	const iconPath = state.heartsBroken ? "assets/broken-heart-icon.png" : "assets/heart-icon.png"
-	if (appIcon && appIcon.getAttribute("src") !== iconPath) {
+	if (state.brandingIconPath === iconPath) {
+		return
+	}
+	state.brandingIconPath = iconPath
+	if (appIcon) {
 		appIcon.setAttribute("src", iconPath)
 	}
-	if (faviconLink && faviconLink.getAttribute("href") !== iconPath) {
+	if (faviconLink) {
 		faviconLink.setAttribute("href", iconPath)
 	}
 }
@@ -946,6 +962,69 @@ const legalCardIndices = (playerIndex ) => {
 	}
 
 	return cards.map((_, i) => i)
+}
+
+const invalidateHandInteractionCache = () => {
+	state.handInteractionCache.key = ""
+	state.handInteractionCache.legalMask = null
+	state.handInteractionCache.selectedMask = null
+	state.handInteractionCache.soloLegal = false
+}
+
+const markHumanHandChanged = () => {
+	state.humanHandRevision += 1
+	invalidateHandInteractionCache()
+}
+
+const markPassSelectionChanged = () => {
+	state.passSelectionRevision += 1
+	invalidateHandInteractionCache()
+}
+
+const getHandInteractionState = () => {
+	const hand = state.players[HUMAN_INDEX]?.hand || []
+	const isHumanTurn = state.roundInProgress && state.currentTurn === HUMAN_INDEX
+	const isPassing = state.passPhase.active
+	const cacheKey = [
+		state.humanHandRevision,
+		state.passSelectionRevision,
+		isHumanTurn ? 1 : 0,
+		isPassing ? 1 : 0,
+		state.currentTurn,
+		state.trickNumber,
+		state.tablePlays.length,
+		state.leadSuit || "-",
+		state.heartsBroken ? 1 : 0,
+		hand.length
+	].join(":")
+	if (state.handInteractionCache.key === cacheKey) {
+		return state.handInteractionCache
+	}
+
+	const legalIndices = isHumanTurn ? legalCardIndices(HUMAN_INDEX) : []
+	const legalMask = hand.length > 0 ? new Array(hand.length).fill(false) : null
+	for (const index of legalIndices) {
+		if (legalMask && index >= 0 && index < legalMask.length) {
+			legalMask[index] = true
+		}
+	}
+
+	const selectedMask = isPassing && hand.length > 0
+		? new Array(hand.length).fill(false)
+		: null
+	if (selectedMask) {
+		for (const index of state.passPhase.humanSelected) {
+			if (index >= 0 && index < selectedMask.length) {
+				selectedMask[index] = true
+			}
+		}
+	}
+
+	state.handInteractionCache.key = cacheKey
+	state.handInteractionCache.legalMask = legalMask
+	state.handInteractionCache.selectedMask = selectedMask
+	state.handInteractionCache.soloLegal = legalIndices.length === 1
+	return state.handInteractionCache
 }
 
 const tableTargetForPlayer = (playerIndex, cardW, cardH) => {
@@ -1395,6 +1474,7 @@ const beginPassTransferAnimation = (now, outgoing, humanReceived, direction) => 
 	state.passTransfer.finalHumanHand = finalHumanHand
 	state.passPhase.active = false
 	state.passPhase.humanSelected = []
+	markPassSelectionChanged()
 	state.handFanProgress = 0
 	state.handFanStartAt = 0
 	updateTurnStatus()
@@ -1592,6 +1672,7 @@ const executePassing = (now ) => {
 	const direction = state.passPhase.direction
 	const outgoing = [[], [], [], []]
 	outgoing[HUMAN_INDEX] = removeCardsAtIndices(state.players[HUMAN_INDEX].hand, state.passPhase.humanSelected)
+	markHumanHandChanged()
 	for (let i = 1; i < PLAYER_COUNT; i += 1) {
 		const computerIndices = chooseComputerPassIndices(i)
 	outgoing[i] = removeCardsAtIndices(state.players[i].hand, computerIndices)
@@ -1624,6 +1705,7 @@ const startPassingPhase = ( ) => {
 	state.handFanProgress = 0
 	state.handFanStartAt = 0
 	state.handLifts = new Array(state.players[HUMAN_INDEX].hand.length).fill(0)
+	markPassSelectionChanged()
 	updateTurnStatus()
 }
 
@@ -1711,6 +1793,7 @@ const finalizeDealtRound = (now ) => {
 		}
 	}
 	}
+	markHumanHandChanged()
 
 	state.currentTurn = state.pendingRound.leaderIndex
 	state.leaderIndex = state.currentTurn
@@ -1999,6 +2082,9 @@ const playCard = (playerIndex, cardIndex, now) => {
 	}
 
 	const card = player.hand.splice(cardIndex, 1)[0]
+	if (playerIndex === HUMAN_INDEX) {
+		markHumanHandChanged()
+	}
 	if (card.suit === "hearts" && !state.heartsBroken) {
 		state.heartsBroken = true
 	triggerHeartsBrokenOverlay(now)
@@ -2185,6 +2271,7 @@ const handleHumanPlayAttempt = ( ) => {
 	} else if (selected.length < 3) {
 			selected.push(hovered)
 	}
+		markPassSelectionChanged()
 		if (selected.length === 3) {
 			executePassing(performance.now())
 	}
@@ -2332,6 +2419,8 @@ const createPlayers = (now = performance.now(), gameNumber = state.gameNumber ||
 		buildHumanPlayer(now),
 		...computerPlayers
 	]
+	markHumanHandChanged()
+	markPassSelectionChanged()
 }
 
 const init = async () => {

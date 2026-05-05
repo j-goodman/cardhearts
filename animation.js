@@ -11,10 +11,11 @@ const OPPONENT_FRAME_PALETTES = [
 	{ base: "#343024", stroke: "#9b9160", accent: "#4f452f", blockA: "#5d5437", blockB: "#4a422d" }
 ]
 
-const backgroundGradientCache = {
+const sceneBackgroundCache = {
 	width: 0,
 	height: 0,
-	gradient: null
+	dpr: 0,
+	canvas: null
 }
 
 const CARD_ANIMATION_DURATION_SCALE = 1.25
@@ -327,18 +328,67 @@ const drawResultPortrait = (rank, innerX, innerY, innerW, innerH) => {
 	ctx.imageSmoothingEnabled = true
 }
 
-const getBackgroundGradient = () => {
+const createBackgroundGradient = (targetCtx, height) => {
+	const gradient = targetCtx.createLinearGradient(0, 0, 0, height)
+	gradient.addColorStop(0, "#4a3934")
+	gradient.addColorStop(1, "#211816")
+	return gradient
+}
+
+const paintTableSurface = (targetCtx, w, h) => {
+	const topInset = w * 0.2
+	const bottomInset = w * 0.06
+	const topY = h * 0.21
+	const bottomY = h * 0.91
+	const frontBottomY = h
+	const frontBottomInset = Math.min(w * 0.11, bottomInset + w * 0.03)
+	targetCtx.save()
+	targetCtx.beginPath()
+	targetCtx.moveTo(topInset, topY)
+	targetCtx.lineTo(w - topInset, topY)
+	targetCtx.lineTo(w - bottomInset, bottomY)
+	targetCtx.lineTo(bottomInset, bottomY)
+	targetCtx.closePath()
+	targetCtx.fillStyle = "#6f6441"
+	targetCtx.fill()
+	targetCtx.beginPath()
+	targetCtx.moveTo(bottomInset, bottomY)
+	targetCtx.lineTo(w - bottomInset, bottomY)
+	targetCtx.lineTo(w - frontBottomInset, frontBottomY)
+	targetCtx.lineTo(frontBottomInset, frontBottomY)
+	targetCtx.closePath()
+	targetCtx.fillStyle = "#4f442f"
+	targetCtx.fill()
+	targetCtx.restore()
+}
+
+const ensureSceneBackground = () => {
 	const width = canvasWidth()
 	const height = canvasHeight()
-	if (!backgroundGradientCache.gradient || backgroundGradientCache.width !== width || backgroundGradientCache.height !== height) {
-		const gradient = ctx.createLinearGradient(0, 0, 0, height)
-		gradient.addColorStop(0, "#4a3934")
-		gradient.addColorStop(1, "#211816")
-		backgroundGradientCache.width = width
-		backgroundGradientCache.height = height
-		backgroundGradientCache.gradient = gradient
+	const dpr = (typeof canvasMetrics !== "undefined" && canvasMetrics.dpr) || state.dpr || 1
+	if (!sceneBackgroundCache.canvas || sceneBackgroundCache.width !== width || sceneBackgroundCache.height !== height || sceneBackgroundCache.dpr !== dpr) {
+		const bgCanvas = sceneBackgroundCache.canvas || document.createElement("canvas")
+		bgCanvas.width = Math.max(1, Math.floor(width * dpr))
+		bgCanvas.height = Math.max(1, Math.floor(height * dpr))
+		const bgCtx = bgCanvas.getContext("2d", { alpha: false }) || bgCanvas.getContext("2d")
+		bgCtx.setTransform(dpr, 0, 0, dpr, 0, 0)
+		bgCtx.fillStyle = createBackgroundGradient(bgCtx, height)
+		bgCtx.fillRect(0, 0, width, height)
+		paintTableSurface(bgCtx, width, height)
+		sceneBackgroundCache.width = width
+		sceneBackgroundCache.height = height
+		sceneBackgroundCache.dpr = dpr
+		sceneBackgroundCache.canvas = bgCanvas
 	}
-	return backgroundGradientCache.gradient
+	return sceneBackgroundCache.canvas
+}
+
+const drawSceneBackground = () => {
+	const bgCanvas = ensureSceneBackground()
+	if (!bgCanvas) {
+		return
+	}
+	ctx.drawImage(bgCanvas, 0, 0, canvasWidth(), canvasHeight())
 }
 
 const updateTableCardAnimations = (deltaMs = IDEAL_FRAME_MS) => {
@@ -419,6 +469,7 @@ const updateGame = (now ) => {
 		const elapsed = now - state.passTransfer.startAt
 		if (elapsed >= doneAt) {
 			state.players[HUMAN_INDEX].hand = state.passTransfer.finalHumanHand
+			markHumanHandChanged()
 			const firstLeader = state.players.findIndex((player) => player.hand.some((card) => card.suit === "clubs" && card.rank === "2"))
 			state.passTransfer.active = false
 			state.passTransfer.outgoingCards = []
@@ -658,30 +709,7 @@ const drawDealAnimation = (now ) => {
 const drawTable = ( ) => {
 	const w = canvasWidth()
 	const h = canvasHeight()
-	const topInset = w * 0.2
-	const bottomInset = w * 0.06
-	const topY = h * 0.21
-	const bottomY = h * 0.91
-	const frontBottomY = h
-	const frontBottomInset = Math.min(w * 0.11, bottomInset + w * 0.03)
-	ctx.save()
-	ctx.beginPath()
-	ctx.moveTo(topInset, topY)
-	ctx.lineTo(w - topInset, topY)
-	ctx.lineTo(w - bottomInset, bottomY)
-	ctx.lineTo(bottomInset, bottomY)
-	ctx.closePath()
-	ctx.fillStyle = "#6f6441"
-	ctx.fill()
-	ctx.beginPath()
-	ctx.moveTo(bottomInset, bottomY)
-	ctx.lineTo(w - bottomInset, bottomY)
-	ctx.lineTo(w - frontBottomInset, frontBottomY)
-	ctx.lineTo(frontBottomInset, frontBottomY)
-	ctx.closePath()
-	ctx.fillStyle = "#4f442f"
-	ctx.fill()
-	ctx.restore()
+	paintTableSurface(ctx, w, h)
 }
 
 const drawOpponentFrames = ( ) => {
@@ -855,11 +883,11 @@ const drawHand = ( ) => {
 	const frameHover = state.pointer.active ? interactiveFrameAtPoint(state.pointer.x, state.pointer.y) : null
 	const isHumanTurn = state.roundInProgress && state.currentTurn === HUMAN_INDEX
 	const isPassing = state.passPhase.active
-	const legalIndices = isHumanTurn ? legalCardIndices(HUMAN_INDEX) : []
-	const legalSet = legalIndices.length > 0 ? new Set(legalIndices) : null
-	const soloLegal = legalIndices.length === 1
-	const selectedSet = isPassing && state.passPhase.humanSelected.length > 0 ? new Set(state.passPhase.humanSelected) : null
-	const hoveredLegal = (isHumanTurn && state.activeHandIndex >= 0 && legalSet?.has(state.activeHandIndex)) || (isPassing && state.activeHandIndex >= 0)
+	const handInteraction = getHandInteractionState()
+	const legalMask = handInteraction.legalMask
+	const soloLegal = handInteraction.soloLegal
+	const selectedMask = handInteraction.selectedMask
+	const hoveredLegal = (isHumanTurn && state.activeHandIndex >= 0 && legalMask?.[state.activeHandIndex]) || (isPassing && state.activeHandIndex >= 0)
 	if (state.windowInteraction.dragPlayerIndex >= 0) {
 		setCanvasCursor("grabbing")
 	} else if (frameHover?.isToggle) {
@@ -871,8 +899,8 @@ const drawHand = ( ) => {
 	}
 	for (let i = 0; i < visualLayout.length; i += 1) {
 		const isHovered = i === state.activeHandIndex
-	const isSelectedForPass = isPassing && selectedSet?.has(i)
-	const isSoloCard = soloLegal && legalSet?.has(i)
+	const isSelectedForPass = isPassing && selectedMask?.[i]
+	const isSoloCard = soloLegal && legalMask?.[i]
 	let targetLift = 0
 	if (isPassing) {
 			targetLift = isSelectedForPass ? 28 : (isHovered ? 14 : 0)
@@ -880,7 +908,7 @@ const drawHand = ( ) => {
 			if (isSoloCard) {
 				targetLift = isHovered ? 36 : 18
 	} else {
-				targetLift = isHovered ? (legalSet?.has(i) ? 36 : 8) : 0
+				targetLift = isHovered ? (legalMask?.[i] ? 36 : 8) : 0
 	}
 		}
 		state.handLifts[i] = blendToward(state.handLifts[i], targetLift, 0.11, deltaMs, CARD_ANIMATION_DURATION_SCALE)
@@ -1168,14 +1196,10 @@ const render = (now = 0) => {
 	updateHeartBranding()
 	const updateEnd = performance.now()
 
-	const width = canvasWidth()
-	const height = canvasHeight()
-	ctx.fillStyle = getBackgroundGradient()
-	ctx.fillRect(0, 0, width, height)
+	drawSceneBackground()
 	const drawStart = performance.now()
 
 	if (state.gameConfig.awaitingModeSelection) {
-		drawTable()
 		const drawEnd = performance.now()
 		reportPerfIfNeeded(now, drawEnd - frameStart, updateEnd - updateStart, drawEnd - drawStart)
 		state.lastNow = now
@@ -1192,7 +1216,6 @@ const render = (now = 0) => {
 		return
 	}
 
-	drawTable()
 	drawDealAnimation(now)
 	drawPlayedCards()
 	drawPassTransfer(now)
