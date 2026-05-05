@@ -1,5 +1,5 @@
 const canvas = document.getElementById("gameCanvas")
-const ctx = canvas.getContext("2d")
+const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true }) || canvas.getContext("2d")
 const statusText = document.querySelector(".status-bar p")
 const appIcon = document.querySelector(".app-icon")
 const faviconLink = document.querySelector('link[rel="icon"]')
@@ -75,9 +75,10 @@ const state = {
 	handVisualLayout: [],
 	handFanProgress: 1,
 	handFanStartAt: 0,
-	handFanDuration: 380,
+	handFanDuration: Math.round(380 * CARD_ANIMATION_DURATION_SCALE),
 	handDrop: 0,
 	handDropUntil: 0,
+	frameDeltaMs: IDEAL_FRAME_MS,
 	players: [],
 	deck: [],
 	characterImages: {},
@@ -128,9 +129,9 @@ const state = {
 	passTransfer: {
 		active: false,
 		startAt: 0,
-		transferDuration: 560,
+		transferDuration: Math.round(560 * CARD_ANIMATION_DURATION_SCALE),
 		holdDuration: 200,
-		dropDuration: 480,
+		dropDuration: Math.round(480 * CARD_ANIMATION_DURATION_SCALE),
 		outgoingCards: [],
 		incomingCards: [],
 		finalHumanHand: []
@@ -152,9 +153,9 @@ const state = {
 		centerX: 0,
 		centerY: 0,
 		bursts: [],
-		enterDuration: 240,
-		pauseDuration: 240,
-		flightDuration: 220
+		enterDuration: Math.round(240 * CARD_ANIMATION_DURATION_SCALE),
+		pauseDuration: Math.round(240 * CARD_ANIMATION_DURATION_SCALE),
+		flightDuration: Math.round(220 * CARD_ANIMATION_DURATION_SCALE)
 	},
 	gameOver: {
 		active: false,
@@ -228,11 +229,11 @@ const hideModeSelectOverlay = () => {
 }
 
 const frameRect = (frame) => {
-	const width = frame.w * canvas.clientWidth
-	const expandedHeight = frame.h * canvas.clientHeight
+	const width = frame.w * canvasWidth()
+	const expandedHeight = frame.h * canvasHeight()
 	return {
-		x: frame.x * canvas.clientWidth,
-		y: frame.y * canvas.clientHeight,
+		x: frame.x * canvasWidth(),
+		y: frame.y * canvasHeight(),
 		w: width,
 		h: frame.collapsed ? FRAME_TITLE_HEIGHT : expandedHeight,
 		expandedH: expandedHeight,
@@ -288,11 +289,11 @@ const updateDraggedFrame = () => {
 	const newX = state.pointer.x - state.windowInteraction.pointerOffsetX
 	const newY = state.pointer.y - state.windowInteraction.pointerOffsetY
 	const minX = -frameRect(frame).w * 0.35
-	const maxX = canvas.clientWidth - frameRect(frame).w * 0.65
+	const maxX = canvasWidth() - frameRect(frame).w * 0.65
 	const minY = 0
-	const maxY = canvas.clientHeight - FRAME_TITLE_HEIGHT
-	frame.x = clamp(newX, minX, maxX) / canvas.clientWidth
-	frame.y = clamp(newY, minY, maxY) / canvas.clientHeight
+	const maxY = canvasHeight() - FRAME_TITLE_HEIGHT
+	frame.x = clamp(newX, minX, maxX) / canvasWidth()
+	frame.y = clamp(newY, minY, maxY) / canvasHeight()
 	frame.springTargetX = null
 	frame.springTargetY = null
 	frame.springVelocityX = 0
@@ -316,15 +317,15 @@ const settleDraggedFrame = () => {
 
 	const frame = frameForPlayer(dragPlayerIndex)
 	if (frame) {
-		const dxPx = (frame.x - frame.spawnX) * canvas.clientWidth
-		const dyPx = (frame.y - frame.spawnY) * canvas.clientHeight
+		const dxPx = (frame.x - frame.spawnX) * canvasWidth()
+		const dyPx = (frame.y - frame.spawnY) * canvasHeight()
 		const distance = Math.hypot(dxPx, dyPx)
 		if (distance > FRAME_DRAG_LIMIT) {
 			const scale = FRAME_SNAP_LIMIT / distance
-			frame.springTargetX = frame.spawnX + (dxPx * scale) / canvas.clientWidth
-			frame.springTargetY = frame.spawnY + (dyPx * scale) / canvas.clientHeight
-			frame.springVelocityX = dxPx === 0 ? 0 : (dxPx / canvas.clientWidth) * 0.02
-			frame.springVelocityY = dyPx === 0 ? 0 : (dyPx / canvas.clientHeight) * 0.02
+			frame.springTargetX = frame.spawnX + (dxPx * scale) / canvasWidth()
+			frame.springTargetY = frame.spawnY + (dyPx * scale) / canvasHeight()
+			frame.springVelocityX = dxPx === 0 ? 0 : (dxPx / canvasWidth()) * 0.02
+			frame.springVelocityY = dyPx === 0 ? 0 : (dyPx / canvasHeight()) * 0.02
 		}
 	}
 
@@ -334,7 +335,14 @@ const settleDraggedFrame = () => {
 	return true
 }
 
-const updateOpponentFrameSprings = () => {
+const updateOpponentFrameSprings = (deltaMs = IDEAL_FRAME_MS) => {
+	const substepCount = Math.max(1, Math.min(3, Math.ceil(deltaMs / IDEAL_FRAME_MS)))
+	const substepMs = deltaMs / substepCount
+	const frameScale = substepMs / IDEAL_FRAME_MS
+	const springPull = scaledFrameEase(0.18, substepMs)
+	const damping = Math.pow(0.72, frameScale)
+	const width = canvasWidth()
+	const height = canvasHeight()
 	for (const frame of state.opponentFrames) {
 		if (frame.playerIndex === state.windowInteraction.dragPlayerIndex) {
 			continue
@@ -343,18 +351,20 @@ const updateOpponentFrameSprings = () => {
 			continue
 		}
 
-		const dx = frame.springTargetX - frame.x
-		const dy = frame.springTargetY - frame.y
-		frame.springVelocityX = (frame.springVelocityX + dx * 0.18) * 0.72
-		frame.springVelocityY = (frame.springVelocityY + dy * 0.18) * 0.72
-		frame.x += frame.springVelocityX
-		frame.y += frame.springVelocityY
+		for (let step = 0; step < substepCount; step += 1) {
+			const dx = frame.springTargetX - frame.x
+			const dy = frame.springTargetY - frame.y
+			frame.springVelocityX = (frame.springVelocityX + dx * springPull) * damping
+			frame.springVelocityY = (frame.springVelocityY + dy * springPull) * damping
+			frame.x += frame.springVelocityX * frameScale
+			frame.y += frame.springVelocityY * frameScale
+		}
 
 		const closeEnough =
-			Math.abs(dx * canvas.clientWidth) < 0.5
-			&& Math.abs(dy * canvas.clientHeight) < 0.5
-			&& Math.abs(frame.springVelocityX * canvas.clientWidth) < 0.5
-			&& Math.abs(frame.springVelocityY * canvas.clientHeight) < 0.5
+			Math.abs((frame.springTargetX - frame.x) * width) < 0.5
+			&& Math.abs((frame.springTargetY - frame.y) * height) < 0.5
+			&& Math.abs(frame.springVelocityX * width) < 0.5
+			&& Math.abs(frame.springVelocityY * height) < 0.5
 		if (closeEnough) {
 			frame.x = frame.springTargetX
 			frame.y = frame.springTargetY
@@ -793,8 +803,8 @@ const toggleFullscreen = async () => {
 }
 
 const handLayout = (cardCount, fanProgress = 1) => {
-	const cw = canvas.clientWidth
-	const ch = canvas.clientHeight
+	const cw = canvasWidth()
+	const ch = canvasHeight()
 	const cardH = Math.min(230, ch * 0.35)
 	const cardW = cardH * 0.72
 	const fullSpread = Math.max(28, Math.min(54, cw * 0.034))
@@ -1665,7 +1675,7 @@ const beginRoundDealAnimation = (now ) => {
 	state.dealAnimation.centerX = centerX
 	state.dealAnimation.centerY = centerY
 	state.dealAnimation.bursts = bursts
-	state.dealAnimation.dealStartAt = now + 70
+	state.dealAnimation.dealStartAt = now + Math.round(70 * CARD_ANIMATION_DURATION_SCALE)
 	state.dealAnimation.completeAt = state.dealAnimation.dealStartAt + state.dealAnimation.enterDuration + state.dealAnimation.pauseDuration + state.dealAnimation.flightDuration + 60
 	state.roundInProgress = false
 	state.roundRestartAt = 0
@@ -2020,7 +2030,7 @@ const playCard = (playerIndex, cardIndex, now) => {
 
 	if (state.tablePlays.length === PLAYER_COUNT) {
 		state.currentTurn = -1
-	state.trickResolveAt = now + 700
+		state.trickResolveAt = now + Math.round(700 * CARD_ANIMATION_DURATION_SCALE)
 	} else {
 		state.currentTurn = nextClockwisePlayer(playerIndex)
 		if (state.currentTurn !== HUMAN_INDEX) {
