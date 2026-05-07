@@ -1,13 +1,10 @@
 const canvas = document.getElementById("gameCanvas")
-const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true }) || canvas.getContext("2d")
+const ctx = canvas.getContext("2d", { alpha: false }) || canvas.getContext("2d")
 const statusText = document.querySelector(".status-bar p")
 const appIcon = document.querySelector(".app-icon")
 const faviconLink = document.querySelector('link[rel="icon"]')
-const modeSelectOverlay = document.querySelector(".mode-select-overlay")
-const modeButtons = Array.from(document.querySelectorAll(".mode-button"))
 const gameOverControls = document.querySelector(".game-over-controls")
 const playAgainButton = document.querySelector(".play-again-button")
-const switchModeButton = document.querySelector(".switch-mode-button")
 const appShell = document.querySelector(".app-shell")
 const stageWrap = document.querySelector(".stage-wrap")
 const fullscreenToggle = document.querySelector(".fullscreen-toggle")
@@ -15,8 +12,7 @@ const fullscreenToggle = document.querySelector(".fullscreen-toggle")
 const PLAYER_COUNT = 4
 const HUMAN_INDEX = 0
 const PASS_DIRECTIONS = ["left", "right", "center"]
-const SHORT_GAME_SCORE = 50
-const LONG_GAME_SCORE = 100
+const TARGET_GAME_SCORE = 50
 const MIN_PORTRAIT_CHANGE_MS = 1200
 const FRAME_TITLE_HEIGHT = 36
 const FRAME_TOGGLE_SIZE = 22
@@ -83,10 +79,12 @@ const state = {
 	},
 	handFanProgress: 1,
 	handFanStartAt: 0,
-	handFanDuration: Math.round(380 * CARD_ANIMATION_DURATION_SCALE),
+	handFanDuration: scaleGameMs(380 * CARD_ANIMATION_DURATION_SCALE),
 	handDrop: 0,
 	handDropUntil: 0,
 	frameDeltaMs: IDEAL_FRAME_MS,
+	smoothedFrameDeltaMs: 0,
+	renderLowQuality: false,
 	players: [],
 	deck: [],
 	characterImages: {},
@@ -117,8 +115,13 @@ const state = {
 	brandingIconPath: "assets/heart-icon.png",
 	pendingRound: null,
 	gameConfig: {
-		targetScore: SHORT_GAME_SCORE,
-		awaitingModeSelection: true
+		targetScore: TARGET_GAME_SCORE
+	},
+	roundIntroChiron: {
+		active: false,
+		text: "FIRST TO 50 POINTS WINS",
+		startAt: 0,
+		endAt: 0
 	},
 	windowInteraction: {
 		dragPlayerIndex: -1,
@@ -138,9 +141,9 @@ const state = {
 	passTransfer: {
 		active: false,
 		startAt: 0,
-		transferDuration: Math.round(560 * CARD_ANIMATION_DURATION_SCALE),
-		holdDuration: 200,
-		dropDuration: Math.round(480 * CARD_ANIMATION_DURATION_SCALE),
+		transferDuration: scaleGameMs(560 * CARD_ANIMATION_DURATION_SCALE * SLOWED_CARD_MOVE_DURATION_MULTIPLIER),
+		holdDuration: scaleGameMs(200),
+		dropDuration: scaleGameMs(480 * CARD_ANIMATION_DURATION_SCALE * SLOWED_CARD_MOVE_DURATION_MULTIPLIER),
 		outgoingCards: [],
 		incomingCards: [],
 		finalHumanHand: []
@@ -148,9 +151,9 @@ const state = {
 	heartsBreakOverlay: {
 		active: false,
 		startAt: 0,
-		riseDuration: 420,
-		holdDuration: 1800,
-		flashDuration: 1800,
+		riseDuration: scaleGameMs(420),
+		holdDuration: scaleGameMs(1800),
+		flashDuration: scaleGameMs(1800),
 		floatOffset: 24
 	},
 	dealAnimation: {
@@ -162,9 +165,10 @@ const state = {
 		centerX: 0,
 		centerY: 0,
 		bursts: [],
-		enterDuration: Math.round(240 * CARD_ANIMATION_DURATION_SCALE),
-		pauseDuration: Math.round(240 * CARD_ANIMATION_DURATION_SCALE),
-		flightDuration: Math.round(220 * CARD_ANIMATION_DURATION_SCALE)
+		useFirstDealSnap: false,
+		enterDuration: scaleGameMs(240 * CARD_ANIMATION_DURATION_SCALE),
+		pauseDuration: scaleGameMs(240 * CARD_ANIMATION_DURATION_SCALE),
+		flightDuration: scaleGameMs(220 * CARD_ANIMATION_DURATION_SCALE)
 	},
 	gameOver: {
 		active: false,
@@ -193,7 +197,6 @@ const ensurePlayAgainButton = () => {
 
 const showPlayAgainButton = () => {
 	ensurePlayAgainButton()
-	updateSwitchModeButtonLabel()
 	if (gameOverControls) {
 		gameOverControls.hidden = false
 	}
@@ -204,39 +207,6 @@ const hidePlayAgainButton = () => {
 		gameOverControls.hidden = true
 	}
 }
-
-const alternateTargetScore = (targetScore = state.gameConfig.targetScore) => {
-	return targetScore === SHORT_GAME_SCORE ? LONG_GAME_SCORE : SHORT_GAME_SCORE
-}
-
-const gameModeName = (targetScore = state.gameConfig.targetScore) => {
-	return targetScore === LONG_GAME_SCORE ? "long" : "short"
-}
-
-const updateSwitchModeButtonLabel = () => {
-	if (!switchModeButton) {
-		return
-	}
-	switchModeButton.textContent = `Switch to ${gameModeName(alternateTargetScore())} game`
-}
-
-const showModeSelectOverlay = () => {
-	state.gameConfig.awaitingModeSelection = true
-	hidePlayAgainButton()
-	if (modeSelectOverlay) {
-		modeSelectOverlay.hidden = false
-	}
-	// No status/caption
-}
-
-const hideModeSelectOverlay = () => {
-	state.gameConfig.awaitingModeSelection = false
-	if (modeSelectOverlay) {
-		modeSelectOverlay.hidden = true
-		modeSelectOverlay.classList.remove('bg-fade', 'expanding')
-	}
-}
-
 const frameRect = (frame) => {
 	const width = frame.w * canvasWidth()
 	const expandedHeight = frame.h * canvasHeight()
@@ -482,27 +452,32 @@ const resetGameState = (now = performance.now()) => {
 	state.handLifts = []
 	state.handFanProgress = 1
 	state.handFanStartAt = 0
+	state.roundIntroChiron.active = false
+	state.roundIntroChiron.startAt = 0
+	state.roundIntroChiron.endAt = 0
 }
 
-const startGameWithTargetScore = (targetScore) => {
-	state.gameConfig.targetScore = targetScore
-	// Animate overlay: expand window, fade in background, then start game
-	if (modeSelectOverlay) {
-		modeSelectOverlay.classList.add('bg-fade')
-		setTimeout(() => {
-			modeSelectOverlay.classList.add('expanding')
-			setTimeout(() => {
-				hideModeSelectOverlay()
-				resetGameState(performance.now())
-				setStatus(`${gameModeName(targetScore)[0].toUpperCase()}${gameModeName(targetScore).slice(1)} game to ${targetScore} points. Dealing cards...`)
-				dealRound(performance.now())
-			}, 480) // match CSS .mode-select-window transition
-		}, 60)
-	} else {
-		hideModeSelectOverlay()
-		resetGameState(performance.now())
-		setStatus(`${gameModeName(targetScore)[0].toUpperCase()}${gameModeName(targetScore).slice(1)} game to ${targetScore} points. Dealing cards...`)
-		dealRound(performance.now())
+const startGame = (now = performance.now()) => {
+	state.gameConfig.targetScore = TARGET_GAME_SCORE
+	resetGameState(now)
+	setStatus(`First to ${TARGET_GAME_SCORE} points wins. Dealing cards...`)
+	dealRound(now)
+}
+
+const scheduleOpponentHandReveal = (now) => {
+	for (let i = 1; i < state.players.length; i += 1) {
+		const player = state.players[i]
+		if (!player) {
+			continue
+		}
+		player.armRevealStartAt = now + scaleGameMs(randomBetween(0, 4990))
+		player.armFanRevealStartAt = player.armRevealStartAt + scaleGameMs(randomBetween(0, 700))
+		if (player.armState) {
+			player.armState.reveal = 0
+			player.armState.revealStartAt = player.armRevealStartAt
+			player.armState.cardFan = 0
+			player.armState.fanRevealStartAt = player.armFanRevealStartAt
+		}
 	}
 }
 
@@ -560,13 +535,7 @@ const beginGameOver = (now) => {
 }
 
 const restartGameAfterGameOver = () => {
-	resetGameState(performance.now())
-	dealRound(performance.now())
-}
-
-const switchGameModeAfterGameOver = () => {
-	state.gameConfig.targetScore = alternateTargetScore()
-	restartGameAfterGameOver()
+	startGame(performance.now())
 }
 const setStatus = (text ) => {
 	if (state.status === text) {
@@ -595,7 +564,7 @@ const updateHeartBranding = ( ) => {
 const triggerHeartsBrokenOverlay = (now ) => {
 	state.heartsBreakOverlay.active = true
 	state.heartsBreakOverlay.startAt = now
-	state.actionPauseUntil = Math.max(state.actionPauseUntil || 0, now + 1500)
+	state.actionPauseUntil = Math.max(state.actionPauseUntil || 0, now + scaleGameMs(1500))
 }
 
 const randomBetween = (min, max) => {
@@ -823,9 +792,11 @@ const handLayout = (cardCount, fanProgress = 1) => {
 	const ch = canvasHeight()
 	const cardH = Math.min(230, ch * 0.35)
 	const cardW = cardH * 0.72
+	const fan = Math.max(0, Math.min(1, fanProgress))
+	const easedFan = fan * fan * (3 - 2 * fan)
 	const fullSpread = Math.max(28, Math.min(54, cw * 0.034))
-	const compactSpread = fullSpread * 0.78
-	const desiredSpread = compactSpread + (fullSpread - compactSpread) * fanProgress
+	const collapsedSpread = Math.max(2, Math.min(8, cardW * 0.04))
+	const desiredSpread = collapsedSpread + (fullSpread - collapsedSpread) * easedFan
 	const passSpread = desiredSpread * 1.14
 	const maxSpread = cardCount > 1
 		? Math.max(18, (cw - 24 - cardW) / (cardCount - 1))
@@ -833,7 +804,8 @@ const handLayout = (cardCount, fanProgress = 1) => {
 	const spread = Math.min(state.passPhase.active ? passSpread : desiredSpread, maxSpread)
 	const fanWidth = cardW + spread * (cardCount - 1)
 	const baseX = Math.max(12, (cw - fanWidth) / 2)
-	const baseY = ch - cardH
+	const entryOffsetY = (1 - easedFan) * (cardH + 42)
+	const baseY = ch - cardH + entryOffsetY
 	const centerIndex = (cardCount - 1) / 2
 	return Array.from({ length: cardCount }, (_, i) => {
 		const t = i - centerIndex
@@ -842,7 +814,7 @@ const handLayout = (cardCount, fanProgress = 1) => {
 			y: baseY,
 			w: cardW,
 			h: cardH,
-			angle: t * 0.018 * fanProgress
+			angle: t * 0.018 * easedFan
 		}
 	})
 }
@@ -1416,8 +1388,16 @@ const beginPassTransferAnimation = (now, outgoing, humanReceived, direction) => 
 	const cardW = cardH * 0.72
 	const giverIndex = passSourceIndex(HUMAN_INDEX, direction)
 	const recipientIndex = passTargetIndex(HUMAN_INDEX, direction)
-	const layout = handLayout(state.players[HUMAN_INDEX].hand.length + outgoing[HUMAN_INDEX].length, state.handFanProgress)
+	const fullHandCount = state.players[HUMAN_INDEX].hand.length + outgoing[HUMAN_INDEX].length
+	const fallbackLayout = handLayout(fullHandCount, state.handFanProgress)
+	const currentVisualLayout = state.handVisualLayout.length === fullHandCount
+		? state.handVisualLayout
+		: fallbackLayout
+	const currentHandLifts = state.handLifts.length === fullHandCount
+		? state.handLifts
+		: new Array(fullHandCount).fill(0)
 	const selected = state.passPhase.humanSelected.slice().sort((a, b) => a - b)
+	const outgoingInVisualOrder = outgoing[HUMAN_INDEX].slice().reverse()
 	const outTarget = passExitForPlayer(recipientIndex, cardW, cardH)
 	const inStart = sideAnchorForPlayer(giverIndex, cardW, cardH)
 	const finalHumanHand = sortHand(state.players[HUMAN_INDEX].hand.concat(humanReceived))
@@ -1428,21 +1408,25 @@ const beginPassTransferAnimation = (now, outgoing, humanReceived, direction) => 
 	}
 
 	const outgoingCards = selected.map((index, i) => {
-		const slot = layout[index] || layout[layout.length - 1]
-	const targetX = outTarget.x + (Math.random() - 0.5) * 46
-	const targetY = outTarget.y + (Math.random() - 0.5) * 36
-	return {
-			img: outgoing[HUMAN_INDEX][i]?.img || null,
-			startX: slot.x,
-			startY: slot.y,
+		const slot = currentVisualLayout[index] || fallbackLayout[index] || fallbackLayout[fallbackLayout.length - 1]
+		const startLift = currentHandLifts[index] || 0
+		const startX = slot.x
+		const startY = slot.y - startLift
+		const startAngle = slot.angle || 0
+		const targetX = outTarget.x + (Math.random() - 0.5) * 46
+		const targetY = outTarget.y + (Math.random() - 0.5) * 36
+		return {
+			img: outgoingInVisualOrder[i]?.img || null,
+			startX,
+			startY,
 			targetX,
 			targetY,
-			ctrlX: (slot.x + targetX) * 0.5,
-			ctrlY: (slot.y + targetY) * 0.5 - 58,
-			w: cardW,
-			h: cardH,
-			startAngle: 0,
-			targetAngle: (Math.random() - 0.5) * 0.8
+			ctrlX: (startX + targetX) * 0.5,
+			ctrlY: (startY + targetY) * 0.5 - 58,
+			w: slot.w || cardW,
+			h: slot.h || cardH,
+			startAngle,
+			targetAngle: startAngle + (Math.random() - 0.5) * 0.8
 		}
 	})
 	const incomingCards = humanReceived.map((_, i) => {
@@ -1475,8 +1459,6 @@ const beginPassTransferAnimation = (now, outgoing, humanReceived, direction) => 
 	state.passPhase.active = false
 	state.passPhase.humanSelected = []
 	markPassSelectionChanged()
-	state.handFanProgress = 0
-	state.handFanStartAt = 0
 	updateTurnStatus()
 }
 
@@ -1702,6 +1684,8 @@ const startPassingPhase = ( ) => {
 	state.passTransfer.finalHumanHand = []
 	state.roundInProgress = false
 	state.currentTurn = -1
+	state.handVisualById = {}
+	state.handVisualLayout = []
 	state.handFanProgress = 0
 	state.handFanStartAt = 0
 	state.handLifts = new Array(state.players[HUMAN_INDEX].hand.length).fill(0)
@@ -1742,14 +1726,21 @@ const beginRoundDealAnimation = (now ) => {
 	const cardH = Math.min(170, canvas.clientHeight * 0.27)
 	const cardW = cardH * 0.72
 	const centerX = canvas.clientWidth / 2 - cardW / 2
-	const centerY = canvas.clientHeight * 0.47 - cardH / 2
+	const centerY = canvas.clientHeight * 0.47 - cardH / 2 + 50
+	const isFirstGameDeal = state.gameNumber === 1 && state.roundNumber === 1
+	const durationMultiplier = isFirstGameDeal ? FIRST_DEAL_DURATION_MULTIPLIER : 1
+	const enterDuration = scaleGameMs(240 * CARD_ANIMATION_DURATION_SCALE * durationMultiplier)
+	const pauseDuration = scaleGameMs(240 * CARD_ANIMATION_DURATION_SCALE * durationMultiplier)
+	const flightDuration = scaleGameMs(220 * CARD_ANIMATION_DURATION_SCALE * durationMultiplier)
 	const cw = canvas.clientWidth
 	const ch = canvas.clientHeight
+	const offscreenMarginX = Math.max(42, Math.round(cardW * 1.15))
+	const offscreenMarginY = Math.max(42, Math.round(cardH * 1.05))
 	const bursts = [
-		{ targetX: -cardW * 1.4, targetY: ch * 0.48 - cardH / 2 },
-		{ targetX: cw + cardW * 0.4, targetY: ch * 0.48 - cardH / 2 },
-		{ targetX: cw * 0.5 - cardW / 2, targetY: -cardH * 1.3 },
-		{ targetX: cw * 0.5 - cardW / 2, targetY: ch + cardH * 0.4 }
+		{ targetX: -cardW - offscreenMarginX, targetY: ch * 0.48 - cardH / 2, stackOffsetX: 0, stackOffsetY: 0 },
+		{ targetX: cw + offscreenMarginX, targetY: ch * 0.48 - cardH / 2, stackOffsetX: 0.3, stackOffsetY: 0.18 },
+		{ targetX: cw * 0.5 - cardW / 2, targetY: -cardH - offscreenMarginY, stackOffsetX: 0.6, stackOffsetY: 0.36 },
+		{ targetX: cw * 0.5 - cardW / 2, targetY: ch + offscreenMarginY, stackOffsetX: 0.9, stackOffsetY: 0.54 }
 	]
 	state.dealAnimation.active = true
 	state.dealAnimation.cardW = cardW
@@ -1757,8 +1748,12 @@ const beginRoundDealAnimation = (now ) => {
 	state.dealAnimation.centerX = centerX
 	state.dealAnimation.centerY = centerY
 	state.dealAnimation.bursts = bursts
-	state.dealAnimation.dealStartAt = now + Math.round(70 * CARD_ANIMATION_DURATION_SCALE)
-	state.dealAnimation.completeAt = state.dealAnimation.dealStartAt + state.dealAnimation.enterDuration + state.dealAnimation.pauseDuration + state.dealAnimation.flightDuration + 60
+	state.dealAnimation.useFirstDealSnap = isFirstGameDeal
+	state.dealAnimation.enterDuration = enterDuration
+	state.dealAnimation.pauseDuration = pauseDuration
+	state.dealAnimation.flightDuration = flightDuration
+	state.dealAnimation.dealStartAt = now + scaleGameMs(70 * CARD_ANIMATION_DURATION_SCALE)
+	state.dealAnimation.completeAt = state.dealAnimation.dealStartAt + enterDuration + pauseDuration + flightDuration + scaleGameMs(60)
 	state.roundInProgress = false
 	state.roundRestartAt = 0
 	state.currentTurn = -1
@@ -1786,10 +1781,13 @@ const finalizeDealtRound = (now ) => {
 	player.displayedTotalPoints = player.totalPoints
 	scheduleNextIdle(player, now)
 	if (i > 0) {
-		player.armRevealStartAt = now + Math.random() * 1800
+		player.armRevealStartAt = Number.POSITIVE_INFINITY
+		player.armFanRevealStartAt = Number.POSITIVE_INFINITY
 		if (player.armState) {
 			player.armState.reveal = 0
 			player.armState.revealStartAt = player.armRevealStartAt
+			player.armState.cardFan = 0
+			player.armState.fanRevealStartAt = player.armFanRevealStartAt
 		}
 	}
 	}
@@ -1803,7 +1801,7 @@ const finalizeDealtRound = (now ) => {
 	state.trickNumber = 0
 	state.roundInProgress = false
 	state.actionPauseUntil = 0
-	state.computerActAt = now + randomBetween(450, 900)
+	state.computerActAt = now + scaleGameDelay(450, 900)
 	state.trickResolveAt = 0
 	state.trickCollecting = false
 	state.trickCollectWinnerIndex = -1
@@ -2116,11 +2114,11 @@ const playCard = (playerIndex, cardIndex, now) => {
 
 	if (state.tablePlays.length === PLAYER_COUNT) {
 		state.currentTurn = -1
-		state.trickResolveAt = now + Math.round(700 * CARD_ANIMATION_DURATION_SCALE)
+		state.trickResolveAt = now + scaleGameMs(700 * CARD_ANIMATION_DURATION_SCALE)
 	} else {
 		state.currentTurn = nextClockwisePlayer(playerIndex)
 		if (state.currentTurn !== HUMAN_INDEX) {
-			state.computerActAt = now + randomBetween(380, 900)
+			state.computerActAt = now + scaleGameDelay(380, 900)
 	}
 	}
 
@@ -2221,8 +2219,11 @@ const finishRound = (now ) => {
 	}
 
 	state.roundInProgress = false
-	state.roundRestartAt = now + 2500
+	state.roundRestartAt = now + scaleGameMs(2500)
 	state.currentTurn = -1
+	state.roundIntroChiron.active = state.roundNumber === 1
+	state.roundIntroChiron.startAt = now
+	state.roundIntroChiron.endAt = state.roundRestartAt
 	let summary
 	if (moonShooter) {
 		const totals = state.players.map((p) => `${p.name}: total ${p.totalPoints}`).join(" | ")
@@ -2233,6 +2234,9 @@ const finishRound = (now ) => {
 	setStatus(`Round ${state.roundNumber} scoring: ${summary}`)
 	const overTarget = state.players.some((p) => p.totalPoints >= state.gameConfig.targetScore)
 	if (overTarget) {
+		state.roundIntroChiron.active = false
+		state.roundIntroChiron.startAt = 0
+		state.roundIntroChiron.endAt = 0
 		beginGameOver(now)
 		return
 	}
@@ -2246,10 +2250,6 @@ const updatePointerPosition = (event ) => {
 }
 
 const handleHumanPlayAttempt = ( ) => {
-	if (state.gameConfig.awaitingModeSelection) {
-		return
-	}
-
 	if (state.gameOver.active) {
 		return
 	}
@@ -2295,22 +2295,6 @@ const handleHumanPlayAttempt = ( ) => {
 }
 
 const bindEvents = ( ) => {
-	if (switchModeButton && !switchModeButton.dataset.bound) {
-		switchModeButton.addEventListener("click", () => {
-			switchGameModeAfterGameOver()
-		})
-		switchModeButton.dataset.bound = "true"
-	}
-	for (const button of modeButtons) {
-		if (button.dataset.bound) {
-			continue
-		}
-		button.addEventListener("click", () => {
-			const targetScore = Number(button.dataset.targetScore) || SHORT_GAME_SCORE
-			startGameWithTargetScore(targetScore)
-		})
-		button.dataset.bound = "true"
-	}
 	if (fullscreenToggle && !fullscreenToggle.dataset.bound) {
 		fullscreenToggle.addEventListener("click", () => {
 			toggleFullscreen().catch(() => {})
@@ -2429,10 +2413,9 @@ const init = async () => {
 	updateFullscreenToggle()
 	hidePlayAgainButton()
 	ensurePlayAgainButton()
-	updateSwitchModeButtonLabel()
 	createPlayers(performance.now(), state.gameNumber, false)
 	state.deck = buildDeck()
-	setStatus("Click either Short Game or Long Game to start.")
+	setStatus(`First to ${TARGET_GAME_SCORE} points wins. Loading cards...`)
 	await Promise.all([
 		loadCardImages(),
 		loadCharacterImages(),
@@ -2440,7 +2423,7 @@ const init = async () => {
 		loadUiImages()
 	])
 	state.cardBackImage = await loadImage("assets/cards/card-back.png")
-	showModeSelectOverlay()
+	startGame(performance.now())
 	requestAnimationFrame(render)
 }
 

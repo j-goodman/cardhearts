@@ -18,15 +18,43 @@ const sceneBackgroundCache = {
 	canvas: null
 }
 
+const cardVariantCache = new WeakMap()
+const opponentFrameChromeCache = new Map()
+
+const GAME_SPEED_MULTIPLIER = 1
+const GAME_TIME_SCALE = 1 / GAME_SPEED_MULTIPLIER
 const CARD_ANIMATION_DURATION_SCALE = 1.25
+const SLOWED_CARD_MOVE_DURATION_MULTIPLIER = 1 / 0.6
+const FIRST_DEAL_DURATION_MULTIPLIER = 1 / 0.25
 const IDEAL_FRAME_MS = 1000 / 60
-const MAX_FRAME_DELTA_MS = 1000 / 24
+const MAX_FRAME_DELTA_MS = 1000 / 15
+const FRAME_DELTA_SMOOTHING = 0.35
+const LOW_QUALITY_FRAME_THRESHOLD_MS = 19
+const LOW_QUALITY_IMAGE_SCALE = 0.78
 
 const canvasWidth = () => (typeof canvasMetrics !== "undefined" && canvasMetrics.width) || canvas.clientWidth
 
 const canvasHeight = () => (typeof canvasMetrics !== "undefined" && canvasMetrics.height) || canvas.clientHeight
 
+const scaleGameMs = (value) => Math.round(value * GAME_TIME_SCALE)
+
+const scaleGameDelay = (min, max) => randomBetween(min, max) * GAME_TIME_SCALE
+
 const clamp01 = (value) => Math.max(0, Math.min(1, value))
+
+const smootherStep01 = (value) => {
+	const t = clamp01(value)
+	return t * t * t * (t * (t * 6 - 15) + 10)
+}
+
+const firstDealSnapProgress = (value) => {
+	const t = clamp01(value)
+	if (t <= 0.82) {
+		return smootherStep01(t / 0.82) * 0.68
+	}
+	const snapT = (t - 0.82) / 0.18
+	return 0.68 + (1 - Math.pow(1 - snapT, 4)) * 0.32
+}
 
 const scaledFrameEase = (perFrameEase, deltaMs, durationScale = 1) => {
 	const safeEase = clamp01(perFrameEase)
@@ -46,6 +74,50 @@ const scaledFrameProgress = (perFrameStep, deltaMs, durationScale = 1) => {
 
 const blendToward = (current, target, perFrameEase, deltaMs, durationScale = 1) => {
 	return current + (target - current) * scaledFrameEase(perFrameEase, deltaMs, durationScale)
+}
+
+const getCachedCardVariant = (image, width, height) => {
+	if (!image || !state.renderLowQuality) {
+		return image
+	}
+	const targetW = Math.max(1, Math.round(width))
+	const targetH = Math.max(1, Math.round(height))
+	const scaledW = Math.max(1, Math.round(targetW * LOW_QUALITY_IMAGE_SCALE))
+	const scaledH = Math.max(1, Math.round(targetH * LOW_QUALITY_IMAGE_SCALE))
+	let variantsBySize = cardVariantCache.get(image)
+	if (!variantsBySize) {
+		variantsBySize = new Map()
+		cardVariantCache.set(image, variantsBySize)
+	}
+	const cacheKey = `${scaledW}x${scaledH}`
+	let variant = variantsBySize.get(cacheKey)
+	if (!variant) {
+		variant = document.createElement("canvas")
+		variant.width = scaledW
+		variant.height = scaledH
+		const variantCtx = variant.getContext("2d")
+		if (variantCtx) {
+			variantCtx.imageSmoothingEnabled = true
+			variantCtx.drawImage(image, 0, 0, scaledW, scaledH)
+		}
+		variantsBySize.set(cacheKey, variant)
+	}
+	return variant
+}
+
+const applyCardShadow = (blur, offsetY, alpha = 0.26) => {
+	const blurScale = state.renderLowQuality ? 0.45 : 1
+	ctx.shadowColor = `rgba(0,0,0,${alpha * (state.renderLowQuality ? 0.6 : 1)})`
+	ctx.shadowBlur = Math.max(1, blur * blurScale)
+	ctx.shadowOffsetY = offsetY * blurScale
+}
+
+const drawCardSprite = (image, x, y, width, height) => {
+	const source = getCachedCardVariant(image, width, height)
+	if (!source) {
+		return
+	}
+	ctx.drawImage(source, x, y, width, height)
 }
 
 const PERF_LOG_INTERVAL_MS = 2000
@@ -185,13 +257,17 @@ const ensureOpponentArmState = (player, now) => {
 	}
 	const idleTarget = randomArmTarget(4, 3, 0.025)
 	const revealStartAt = player.armRevealStartAt || 0
+	const fanRevealStartAt = player.armFanRevealStartAt || revealStartAt
 	const initialReveal = (player.hand?.length || 0) > 0 && now >= revealStartAt ? 1 : 0
+	const initialCardFan = (player.hand?.length || 0) > 0 && now >= fanRevealStartAt ? 1 : 0
 	player.armState = {
 		x: idleTarget.x,
 		y: idleTarget.y,
 		angle: idleTarget.angle,
 		reveal: initialReveal,
 		revealStartAt: revealStartAt,
+		cardFan: initialCardFan,
+		fanRevealStartAt: fanRevealStartAt,
 		idleX: idleTarget.x,
 		idleY: idleTarget.y,
 		idleAngle: idleTarget.angle,
@@ -221,6 +297,7 @@ const updateOpponentArmPoses = (now) => {
 		let targetY = armState.idleY
 		let targetAngle = armState.idleAngle
 		const readyToReveal = hasCards && now >= (armState.revealStartAt || 0)
+		const readyToFan = readyToReveal && now >= (armState.fanRevealStartAt || 0)
 		const recklessness = Math.max(0, Math.min(1, player.personality?.recklessness ?? 0.5))
 		const revealUpRate = 0.05 * (0.6 + recklessness * 0.8)
 
@@ -229,20 +306,22 @@ const updateOpponentArmPoses = (now) => {
 		armState.y = blendToward(armState.y, targetY, 0.08, deltaMs)
 		armState.angle = blendToward(armState.angle, targetAngle, 0.08, deltaMs)
 		armState.reveal = blendToward(armState.reveal, readyToReveal ? 1 : 0, readyToReveal ? revealUpRate : 0.16, deltaMs)
+		armState.cardFan = blendToward(armState.cardFan || 0, readyToFan ? 1 : 0, readyToFan ? revealUpRate * 0.9 : 0.2, deltaMs)
 	}
 }
 
-const drawArmCardFan = (cardCount, cardImage, cardW, cardH, fanOffsetX = 0) => {
+const drawArmCardFan = (cardCount, cardImage, cardW, cardH, fanOffsetX = 0, fanProgress = 1) => {
 	if (!cardImage || cardCount <= 0) {
 		return
 	}
 
+	const fan = clamp01(fanProgress)
 	const compactFan = cardCount <= 3
-	const spread = compactFan
+	const spread = (compactFan
 		? 0.12 + Math.max(0, cardCount - 1) * 0.03
-		: Math.min(0.95, Math.max(0.24, cardCount * 0.06))
-	const spacing = compactFan ? cardW * 0.78 : cardW * 1.45
-	const arch = compactFan ? cardH * 0.035 : cardH * 0.06
+		: Math.min(0.95, Math.max(0.24, cardCount * 0.06))) * fan
+	const spacing = (compactFan ? cardW * 0.78 : cardW * 1.45) * fan
+	const arch = (compactFan ? cardH * 0.035 : cardH * 0.06) * fan
 	for (let i = 0; i < cardCount; i += 1) {
 		const offset = cardCount === 1 ? 0 : i / (cardCount - 1) - 0.5
 		const angle = offset * spread
@@ -251,7 +330,7 @@ const drawArmCardFan = (cardCount, cardImage, cardW, cardH, fanOffsetX = 0) => {
 		ctx.save()
 		ctx.translate(x, y)
 		ctx.rotate(angle)
-		ctx.drawImage(cardImage, -cardW / 2, -cardH * 0.96, cardW, cardH)
+		drawCardSprite(cardImage, -cardW / 2, -cardH * 0.96, cardW, cardH)
 		ctx.restore()
 	}
 }
@@ -283,6 +362,7 @@ const drawOpponentArm = (player, playerIndex, innerX, innerY, innerW, innerH, po
 	if ((player.hand?.length || 0) <= 0 && reveal < 0.02) {
 		return
 	}
+	const cardFanProgress = smootherStep01(Math.max(0, Math.min(1, armState.cardFan || 0)))
 	const stowedAngle = 1.02
 	const drawAngle = stowedAngle + (baseAngle + armState.angle - stowedAngle) * reveal
 	const drawX = handX + armState.x * reveal
@@ -294,7 +374,7 @@ const drawOpponentArm = (player, playerIndex, innerX, innerY, innerW, innerH, po
 		ctx.scale(-1, 1)
 	}
 	ctx.rotate(drawAngle)
-	drawArmCardFan(player.hand?.length || 0, cardImage, cardW, cardH, fanOffsetX)
+	drawArmCardFan(player.hand?.length || 0, cardImage, cardW, cardH, fanOffsetX, cardFanProgress)
 	ctx.imageSmoothingEnabled = false
 	ctx.drawImage(armImage, Math.floor(-armW / 2), Math.floor(-armH / 2), Math.floor(armW), Math.floor(armH))
 	ctx.imageSmoothingEnabled = true
@@ -393,10 +473,13 @@ const drawSceneBackground = () => {
 
 const updateTableCardAnimations = (deltaMs = IDEAL_FRAME_MS) => {
 	for (const play of state.tablePlays) {
+		const durationScale = play.collecting
+			? CARD_ANIMATION_DURATION_SCALE * SLOWED_CARD_MOVE_DURATION_MULTIPLIER
+			: CARD_ANIMATION_DURATION_SCALE
 		const posEase = play.collecting ? 0.10 : 0.18
-		play.x = blendToward(play.x, play.targetX, posEase, deltaMs, CARD_ANIMATION_DURATION_SCALE)
-		play.y = blendToward(play.y, play.targetY, posEase, deltaMs, CARD_ANIMATION_DURATION_SCALE)
-		play.angle = blendToward(play.angle, play.targetAngle, play.collecting ? 0.15 : 0.10, deltaMs, CARD_ANIMATION_DURATION_SCALE)
+		play.x = blendToward(play.x, play.targetX, posEase, deltaMs, durationScale)
+		play.y = blendToward(play.y, play.targetY, posEase, deltaMs, durationScale)
+		play.angle = blendToward(play.angle, play.targetAngle, play.collecting ? 0.15 : 0.10, deltaMs, durationScale)
 		if (play.flipT < 1.0) {
 			play.flipT = Math.min(1.0, play.flipT + scaledFrameProgress(0.065, deltaMs, CARD_ANIMATION_DURATION_SCALE))
 		}
@@ -425,7 +508,7 @@ const startTrickCollect = (winnerIndex, now) => {
 	}
 	state.trickCollecting = true
 	state.trickCollectWinnerIndex = winnerIndex
-	state.trickCollectDoneAt = now + Math.round(860 * CARD_ANIMATION_DURATION_SCALE)
+	state.trickCollectDoneAt = now + scaleGameMs(860 * CARD_ANIMATION_DURATION_SCALE * SLOWED_CARD_MOVE_DURATION_MULTIPLIER)
 }
 
 const advanceTrick = (now ) => {
@@ -444,7 +527,7 @@ const advanceTrick = (now ) => {
 	return
 	}
 	if (state.currentTurn !== HUMAN_INDEX) {
-		state.computerActAt = now + randomBetween(550, 1100)
+		state.computerActAt = now + scaleGameDelay(550, 1100)
 	}
 	updateTurnStatus()
 }
@@ -478,15 +561,14 @@ const updateGame = (now ) => {
 			state.currentTurn = firstLeader >= 0 ? firstLeader : 0
 			state.leaderIndex = state.currentTurn
 			state.roundInProgress = true
-			state.computerActAt = now + randomBetween(450, 900)
+			state.computerActAt = now + scaleGameDelay(450, 900)
+			scheduleOpponentHandReveal(now)
 			state.handLifts = new Array(state.players[HUMAN_INDEX].hand.length).fill(0)
-			state.handFanProgress = 0
-			state.handFanStartAt = now
 			updateTurnStatus()
 		}
 	}
 
-	if (!state.passPhase.active && !state.passTransfer.active && state.handFanProgress < 1) {
+	if (!state.passTransfer.active && state.handFanProgress < 1) {
 		if (!state.handFanStartAt) {
 			state.handFanStartAt = now
 		}
@@ -504,6 +586,12 @@ const updateGame = (now ) => {
 
 	if (state.dealAnimation.active && now >= state.dealAnimation.completeAt) {
 		finalizeDealtRound(now)
+	}
+
+	if (state.roundIntroChiron.active && now >= state.roundIntroChiron.endAt) {
+		state.roundIntroChiron.active = false
+		state.roundIntroChiron.startAt = 0
+		state.roundIntroChiron.endAt = 0
 	}
 
 	if (now < (state.actionPauseUntil || 0)) {
@@ -672,34 +760,24 @@ const drawDealAnimation = (now ) => {
 	const centerY = anim.centerY
 	const elapsed = now - anim.dealStartAt
 	const enterT = Math.max(0, Math.min(1, elapsed / anim.enterDuration))
-	const easedEnter = 1 - (1 - enterT) * (1 - enterT)
+	const easedEnter = anim.useFirstDealSnap ? smootherStep01(enterT) : 1 - (1 - enterT) * (1 - enterT)
 	const stackStartY = canvasHeight() + cardH * 0.4
 	const stackY = stackStartY + (centerY - stackStartY) * easedEnter
 	const flightElapsed = elapsed - anim.enterDuration - anim.pauseDuration
 	const flightT = flightElapsed <= 0
 		? 0
 		: Math.max(0, Math.min(1, flightElapsed / anim.flightDuration))
+	const flightProgress = anim.useFirstDealSnap ? firstDealSnapProgress(flightT) : smootherStep01(flightT)
 	ctx.save()
 	if (state.cardBackImage) {
-		if (flightT <= 0) {
-			for (let s = 0; s < 5; s += 1) {
-				ctx.save()
-				ctx.shadowColor = "rgba(0,0,0,0.22)"
-				ctx.shadowBlur = 4
-				ctx.shadowOffsetY = 2
-				ctx.drawImage(state.cardBackImage, centerX + s * 0.35, stackY + s * 0.2, cardW, cardH)
-				ctx.restore()
-			}
-		}
-
 		for (const burst of anim.bursts) {
-			const x = centerX + (burst.targetX - centerX) * flightT
-			const y = stackY + (burst.targetY - centerY) * flightT
+			const startX = centerX + (burst.stackOffsetX || 0)
+			const startY = stackY + (burst.stackOffsetY || 0)
+			const x = startX + (burst.targetX - startX) * flightProgress
+			const y = startY + (burst.targetY - centerY - (burst.stackOffsetY || 0)) * flightProgress
 			ctx.save()
-			ctx.shadowColor = "rgba(0,0,0,0.26)"
-			ctx.shadowBlur = 5
-			ctx.shadowOffsetY = 2
-			ctx.drawImage(state.cardBackImage, x, y, cardW, cardH)
+			applyCardShadow(5, 2, 0.26)
+			drawCardSprite(state.cardBackImage, x, y, cardW, cardH)
 			ctx.restore()
 		}
 	}
@@ -710,6 +788,118 @@ const drawTable = ( ) => {
 	const w = canvasWidth()
 	const h = canvasHeight()
 	paintTableSurface(ctx, w, h)
+}
+
+const getOpponentFrameChrome = ({
+	player,
+	palette,
+	frameW,
+	frameH,
+	titleH,
+	toggleX,
+	toggleY,
+	toggleW,
+	toggleH,
+	nameFontSize,
+	hideIntroZeroScore
+}) => {
+	const displayedTotal = player.displayedTotalPoints ?? player.totalPoints
+	const displayedDelta = player.roundPoints ?? 0
+	const scoreText = hideIntroZeroScore
+		? ""
+		: (displayedDelta > 0 ? `${displayedTotal} pts  (+${displayedDelta})` : `${displayedTotal} pts`)
+	const cacheKey = [
+		palette.base,
+		palette.stroke,
+		palette.accent,
+		palette.blockA,
+		palette.blockB,
+		player.name,
+		player.color,
+		frameW,
+		frameH,
+		titleH,
+		toggleX,
+		toggleY,
+		toggleW,
+		toggleH,
+		nameFontSize,
+		scoreText
+	].join("|")
+	let chrome = opponentFrameChromeCache.get(cacheKey)
+	if (chrome) {
+		return chrome
+	}
+
+	chrome = document.createElement("canvas")
+	chrome.width = Math.max(1, frameW)
+	chrome.height = Math.max(1, frameH)
+	const chromeCtx = chrome.getContext("2d")
+	if (!chromeCtx) {
+		return chrome
+	}
+
+	chromeCtx.fillStyle = palette.base
+	chromeCtx.fillRect(0, 0, frameW, frameH)
+	chromeCtx.lineWidth = 1
+	chromeCtx.strokeStyle = palette.stroke
+	chromeCtx.beginPath()
+	chromeCtx.moveTo(0.5, frameH - 0.5)
+	chromeCtx.lineTo(0.5, 0.5)
+	chromeCtx.lineTo(frameW - 0.5, 0.5)
+	chromeCtx.lineTo(frameW - 0.5, frameH - 0.5)
+	chromeCtx.stroke()
+	chromeCtx.fillStyle = palette.blockA
+	chromeCtx.fillRect(0, 0, Math.floor(frameW * 0.18), frameH)
+	chromeCtx.fillStyle = palette.blockB
+	chromeCtx.fillRect(frameW - Math.floor(frameW * 0.14), 0, Math.floor(frameW * 0.14), frameH)
+	chromeCtx.fillStyle = palette.accent
+	chromeCtx.fillRect(0, 0, frameW, titleH)
+	chromeCtx.font = `${nameFontSize}px "Trebuchet MS", "Avenir Next", sans-serif`
+	chromeCtx.textBaseline = "middle"
+	const namePadX = 10
+	const namePadY = 7
+	const nameX = 10
+	const nameY = 6
+	const textW = Math.ceil(chromeCtx.measureText(player.name).width)
+	chromeCtx.fillStyle = "#4f382d"
+	chromeCtx.fillRect(nameX, nameY, textW + namePadX * 2, nameFontSize + namePadY * 2)
+	chromeCtx.fillStyle = "#ffffff"
+	chromeCtx.fillText(player.name, nameX + namePadX, nameY + namePadY + nameFontSize / 2)
+	chromeCtx.textAlign = "right"
+	chromeCtx.fillStyle = "rgba(255, 244, 230, 0.85)"
+	if (scoreText) {
+		chromeCtx.fillText(scoreText, frameW - FRAME_TOGGLE_SIZE - 18, titleH / 2)
+	}
+	chromeCtx.fillStyle = "rgba(79, 56, 45, 0.95)"
+	chromeCtx.fillRect(toggleX, toggleY, toggleW, toggleH)
+	chromeCtx.font = `${Math.max(14, Math.floor(nameFontSize * 1.05))}px "Avenir Next", sans-serif`
+	chromeCtx.textAlign = "center"
+	chromeCtx.textBaseline = "middle"
+	chromeCtx.fillStyle = "#ffffff"
+	chromeCtx.fillText(player.collapsed ? "⛶" : "-", toggleX + toggleW / 2, toggleY + toggleH / 2 + (player.collapsed ? 1 : -1))
+	chromeCtx.textAlign = "left"
+	chromeCtx.textBaseline = "alphabetic"
+	chromeCtx.fillStyle = palette.blockB
+	const innerX = 10
+	const innerY = titleH + 10
+	const innerW = frameW - 20
+	const innerH = frameH - innerY - 10
+	chromeCtx.fillRect(innerX, innerY, innerW, innerH)
+	chromeCtx.lineWidth = 1
+	chromeCtx.strokeStyle = palette.stroke
+	chromeCtx.beginPath()
+	chromeCtx.moveTo(innerX + 0.5, innerY + innerH - 0.5)
+	chromeCtx.lineTo(innerX + 0.5, innerY + 0.5)
+	chromeCtx.lineTo(innerX + innerW - 0.5, innerY + 0.5)
+	chromeCtx.lineTo(innerX + innerW - 0.5, innerY + innerH - 0.5)
+	chromeCtx.stroke()
+	chromeCtx.fillStyle = palette.blockA
+	chromeCtx.fillRect(innerX + 8, innerY + 8, Math.floor(innerW * 0.26), Math.floor(innerH * 0.26))
+	chromeCtx.fillStyle = player.color
+	chromeCtx.fillRect(innerX, innerY, innerW, innerH)
+	opponentFrameChromeCache.set(cacheKey, chrome)
+	return chrome
 }
 
 const drawOpponentFrames = ( ) => {
@@ -728,54 +918,31 @@ const drawOpponentFrames = ( ) => {
 	const frameW = Math.floor(fw)
 	const frameH = Math.floor(fh)
 	const toggle = frameToggleRect(frame)
-		ctx.save()
-	ctx.translate(Math.floor(x), Math.floor(y))
-		ctx.fillStyle = palette.base
-	ctx.fillRect(0, 0, frameW, frameH)
-	ctx.lineWidth = 1
-	ctx.strokeStyle = palette.stroke
-	ctx.beginPath()
-	ctx.moveTo(0.5, frameH - 0.5)
-	ctx.lineTo(0.5, 0.5)
-	ctx.lineTo(frameW - 0.5, 0.5)
-	ctx.lineTo(frameW - 0.5, frameH - 0.5)
-	ctx.stroke()
-		ctx.fillStyle = palette.blockA
-	ctx.fillRect(0, 0, Math.floor(frameW * 0.18), frameH)
-	ctx.fillStyle = palette.blockB
-	ctx.fillRect(frameW - Math.floor(frameW * 0.14), 0, Math.floor(frameW * 0.14), frameH)
-		ctx.fillStyle = palette.accent
-	ctx.fillRect(0, 0, frameW, titleH)
-		const nameFontSize = Math.max(11, Math.floor(fw * 0.06))
-	ctx.font = `${nameFontSize}px "Trebuchet MS", "Avenir Next", sans-serif`
-	ctx.textBaseline = "middle"
-	const namePadX = 10
-	const namePadY = 7
-	const nameX = 10
-	const nameY = 6
-	const textW = Math.ceil(ctx.measureText(player.name).width)
-	ctx.fillStyle = "#4f382d"
-	ctx.fillRect(nameX, nameY, textW + namePadX * 2, nameFontSize + namePadY * 2)
-	ctx.fillStyle = "#ffffff"
-	ctx.fillText(player.name, nameX + namePadX, nameY + namePadY + nameFontSize / 2)
-		// Score right-aligned in title bar
-		ctx.textAlign = "right"
-	ctx.fillStyle = "rgba(255, 244, 230, 0.85)"
+	const localToggleX = toggle.x - x
+	const localToggleY = toggle.y - y
 	const displayedTotal = player.displayedTotalPoints ?? player.totalPoints
 	const displayedDelta = player.roundPoints ?? 0
-	const scoreText = displayedDelta > 0
-			? `${displayedTotal} pts  (+${displayedDelta})`
-			: `${displayedTotal} pts`
-	ctx.fillText(scoreText, frameW - FRAME_TOGGLE_SIZE - 18, titleH / 2)
-	ctx.fillStyle = "rgba(79, 56, 45, 0.95)"
-	ctx.fillRect(toggle.x - x, toggle.y - y, toggle.w, toggle.h)
-	ctx.font = `${Math.max(14, Math.floor(nameFontSize * 1.05))}px "Avenir Next", sans-serif`
-	ctx.textAlign = "center"
-	ctx.textBaseline = "middle"
-	ctx.fillStyle = "#ffffff"
-	ctx.fillText(frame.collapsed ? "⛶" : "-", toggle.x - x + toggle.w / 2, toggle.y - y + toggle.h / 2 + (frame.collapsed ? 1 : -1))
-	ctx.textAlign = "left"
-	ctx.textBaseline = "alphabetic"
+	const hideIntroZeroScore = state.roundNumber === 1
+		&& !state.roundInProgress
+		&& displayedTotal === 0
+		&& displayedDelta === 0
+	const nameFontSize = Math.max(11, Math.floor(fw * 0.06))
+	const chrome = getOpponentFrameChrome({
+		player: { ...player, collapsed: frame.collapsed },
+		palette,
+		frameW,
+		frameH,
+		titleH,
+		toggleX: localToggleX,
+		toggleY: localToggleY,
+		toggleW: toggle.w,
+		toggleH: toggle.h,
+		nameFontSize,
+		hideIntroZeroScore
+	})
+		ctx.save()
+	ctx.translate(Math.floor(x), Math.floor(y))
+	ctx.drawImage(chrome, 0, 0)
 		if (frame.collapsed) {
 			ctx.restore()
 			continue
@@ -784,20 +951,6 @@ const drawOpponentFrames = ( ) => {
 	const innerY = titleH + 10
 	const innerW = frameW - 20
 	const innerH = frameH - innerY - 10
-		ctx.fillStyle = palette.blockB
-	ctx.fillRect(innerX, innerY, innerW, innerH)
-	ctx.lineWidth = 1
-	ctx.strokeStyle = palette.stroke
-	ctx.beginPath()
-	ctx.moveTo(innerX + 0.5, innerY + innerH - 0.5)
-	ctx.lineTo(innerX + 0.5, innerY + 0.5)
-	ctx.lineTo(innerX + innerW - 0.5, innerY + 0.5)
-	ctx.lineTo(innerX + innerW - 0.5, innerY + innerH - 0.5)
-	ctx.stroke()
-		ctx.fillStyle = palette.blockA
-	ctx.fillRect(innerX + 8, innerY + 8, Math.floor(innerW * 0.26), Math.floor(innerH * 0.26))
-	ctx.fillStyle = player.color
-	ctx.fillRect(innerX, innerY, innerW, innerH)
 		ctx.save()
 		ctx.beginPath()
 		ctx.rect(innerX, innerY, innerW, innerH)
@@ -820,15 +973,13 @@ const drawPlayedCards = ( ) => {
 	const cx = play.x + play.w / 2
 	const cy = play.y + play.h / 2
 	ctx.save()
-	ctx.shadowColor = "rgba(0,0,0,0.28)"
-	ctx.shadowBlur = 7
-	ctx.shadowOffsetY = 3
+	applyCardShadow(7, 3, 0.28)
 	ctx.translate(cx, cy)
 	ctx.rotate(play.angle || 0)
 	ctx.scale(scaleX, 1)
 	const img = showFront ? play.card.img : state.cardBackImage
 	if (img) {
-			ctx.drawImage(img, -play.w / 2, -play.h / 2, play.w, play.h)
+			drawCardSprite(img, -play.w / 2, -play.h / 2, play.w, play.h)
 	}
 		ctx.restore()
 	}
@@ -838,11 +989,6 @@ const drawHand = ( ) => {
 	if (state.dealAnimation.active) {
 		setCanvasCursor("default")
 	return
-	}
-
-	if (state.gameConfig.awaitingModeSelection) {
-		setCanvasCursor("default")
-		return
 	}
 
 	const hand = state.players[HUMAN_INDEX].hand
@@ -923,13 +1069,11 @@ const drawHand = ( ) => {
 		ctx.save()
 	ctx.translate(cx, cy)
 	ctx.rotate(slot.angle)
-	ctx.shadowColor = "rgba(0,0,0,0.24)"
-	ctx.shadowBlur = 5
-	ctx.shadowOffsetY = 2
+	applyCardShadow(5, 2, 0.24)
 	if (card && card.img) {
-			ctx.drawImage(card.img, -slot.w / 2, -slot.h / 2, slot.w, slot.h)
+			drawCardSprite(card.img, -slot.w / 2, -slot.h / 2, slot.w, slot.h)
 	} else if (state.cardBackImage) {
-			ctx.drawImage(state.cardBackImage, -slot.w / 2, -slot.h / 2, slot.w, slot.h)
+			drawCardSprite(state.cardBackImage, -slot.w / 2, -slot.h / 2, slot.w, slot.h)
 	}
 		ctx.restore()
 	}
@@ -948,7 +1092,7 @@ const drawPassTransfer = (now ) => {
 	ctx.save()
 	for (const card of anim.outgoingCards) {
 		const t = Math.max(0, Math.min(1, elapsed / transferEnd))
-	const eased = 1 - Math.pow(1 - t, 3)
+	const eased = smootherStep01(t)
 	const x = quadraticPoint(card.startX, card.ctrlX, card.targetX, eased)
 	const y = quadraticPoint(card.startY, card.ctrlY, card.targetY, eased)
 	const angle = card.startAngle + (card.targetAngle - card.startAngle) * eased
@@ -966,10 +1110,8 @@ const drawPassTransfer = (now ) => {
 	ctx.translate(x + card.w / 2, y + card.h / 2)
 	ctx.rotate(angle)
 	ctx.scale(scaleX, 1)
-	ctx.shadowColor = "rgba(0,0,0,0.26)"
-	ctx.shadowBlur = 7
-	ctx.shadowOffsetY = 3
-	ctx.drawImage(drawImg, -card.w / 2, -card.h / 2, card.w, card.h)
+	applyCardShadow(7, 3, 0.26)
+	drawCardSprite(drawImg, -card.w / 2, -card.h / 2, card.w, card.h)
 	ctx.restore()
 	}
 
@@ -980,13 +1122,13 @@ const drawPassTransfer = (now ) => {
 	let dropT = 0
 	if (elapsed < transferEnd) {
 			const t = Math.max(0, Math.min(1, elapsed / transferEnd))
-	const eased = 1 - Math.pow(1 - t, 3)
+	const eased = smootherStep01(t)
 	x = quadraticPoint(card.startX, card.ctrlX, card.stagingX, eased)
 	y = quadraticPoint(card.startY, card.ctrlY, card.stagingY, eased)
 	angle = card.startAngle + (card.stagingAngle - card.startAngle) * eased
 	} else if (elapsed >= holdEnd) {
 			dropT = Math.max(0, Math.min(1, (elapsed - holdEnd) / anim.dropDuration))
-	const eased = dropT * dropT * (3 - 2 * dropT)
+	const eased = smootherStep01(dropT)
 	x = quadraticPoint(card.stagingX, (card.stagingX + card.dropX) * 0.5, card.dropX, eased)
 	y = quadraticPoint(card.stagingY, (card.stagingY + card.dropY) * 0.5 + 26, card.dropY, eased)
 	angle = card.stagingAngle + (card.dropAngle - card.stagingAngle) * eased
@@ -1008,10 +1150,8 @@ const drawPassTransfer = (now ) => {
 	ctx.translate(x + card.w / 2, y + card.h / 2)
 	ctx.rotate(angle)
 	ctx.scale(scaleX, 1)
-	ctx.shadowColor = "rgba(0,0,0,0.26)"
-	ctx.shadowBlur = 7
-	ctx.shadowOffsetY = 3
-	ctx.drawImage(drawImg, -card.w / 2, -card.h / 2, card.w, card.h)
+	applyCardShadow(7, 3, 0.26)
+	drawCardSprite(drawImg, -card.w / 2, -card.h / 2, card.w, card.h)
 	ctx.restore()
 	}
 
@@ -1140,6 +1280,45 @@ const drawHeartsBrokenOverlay = (now ) => {
 	ctx.restore()
 }
 
+const drawRoundIntroChiron = (now ) => {
+	const chiron = state.roundIntroChiron
+	if (!chiron?.active || !chiron.text) {
+		return
+	}
+
+	const duration = Math.max(1, chiron.endAt - chiron.startAt)
+	const elapsed = Math.max(0, now - chiron.startAt)
+	const progress = clamp01(elapsed / duration)
+	const fadeIn = smootherStep01(Math.min(1, progress / 0.22))
+	const fadeOut = 1 - smootherStep01(Math.max(0, (progress - 0.78) / 0.22))
+	const alpha = Math.max(0, Math.min(1, fadeIn * fadeOut))
+	if (alpha <= 0.001) {
+		return
+	}
+
+	const width = canvasWidth()
+	const height = canvasHeight()
+	const fontSize = Math.max(18, Math.floor(width * 0.026))
+	const letterSpacing = Math.max(1.2, fontSize * 0.09)
+	ctx.save()
+	ctx.font = `700 ${fontSize}px "Avenir Next Condensed", "Trebuchet MS", sans-serif`
+	ctx.globalAlpha = alpha
+	ctx.fillStyle = "rgba(255, 244, 230, 0.98)"
+	ctx.textAlign = "center"
+	ctx.textBaseline = "middle"
+	ctx.shadowColor = "rgba(0, 0, 0, 0.28)"
+	ctx.shadowBlur = 10
+	ctx.shadowOffsetY = 3
+	if (typeof ctx.letterSpacing === "string") {
+		ctx.letterSpacing = `${letterSpacing}px`
+	}
+	ctx.fillText(chiron.text, width / 2, height / 2 + 1)
+	if (typeof ctx.letterSpacing === "string") {
+		ctx.letterSpacing = "0px"
+	}
+	ctx.restore()
+}
+
 const drawPassPrompt = ( ) => {
 	if (!state.passPhase.active) {
 		return
@@ -1186,10 +1365,16 @@ const drawPassPrompt = ( ) => {
 
 const render = (now = 0) => {
 	const frameStart = performance.now()
-	const deltaMs = state.lastNow
-		? Math.min(MAX_FRAME_DELTA_MS, Math.max(0, now - state.lastNow))
+	const rawDeltaMs = state.lastNow
+		? Math.max(0, now - state.lastNow)
 		: IDEAL_FRAME_MS
+	const cappedDeltaMs = Math.min(MAX_FRAME_DELTA_MS, rawDeltaMs)
+	const deltaMs = state.smoothedFrameDeltaMs > 0
+		? state.smoothedFrameDeltaMs + (cappedDeltaMs - state.smoothedFrameDeltaMs) * FRAME_DELTA_SMOOTHING
+		: cappedDeltaMs
+	state.smoothedFrameDeltaMs = deltaMs
 	state.frameDeltaMs = deltaMs
+	state.renderLowQuality = deltaMs > LOW_QUALITY_FRAME_THRESHOLD_MS || rawDeltaMs > MAX_FRAME_DELTA_MS
 
 	const updateStart = performance.now()
 	updateGame(now)
@@ -1198,14 +1383,6 @@ const render = (now = 0) => {
 
 	drawSceneBackground()
 	const drawStart = performance.now()
-
-	if (state.gameConfig.awaitingModeSelection) {
-		const drawEnd = performance.now()
-		reportPerfIfNeeded(now, drawEnd - frameStart, updateEnd - updateStart, drawEnd - drawStart)
-		state.lastNow = now
-		requestAnimationFrame(render)
-		return
-	}
 
 	if (state.gameOver?.active) {
 		drawGameOverRanking()
@@ -1225,6 +1402,7 @@ const render = (now = 0) => {
 	drawYouLabel()
 	drawPassPrompt()
 	drawHeartsBrokenOverlay(now)
+	drawRoundIntroChiron(now)
 	const drawEnd = performance.now()
 	reportPerfIfNeeded(now, drawEnd - frameStart, updateEnd - updateStart, drawEnd - drawStart)
 	state.lastNow = now
