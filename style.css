@@ -111,57 +111,16 @@ body {
 	border-radius: 7px;
 }
 
-.mode-select-overlay,
 .game-over-controls {
 	position: absolute;
 	inset: 12px;
 	z-index: 3;
 }
 
-.mode-select-overlay {
-	display: grid;
-	place-items: center;
-	padding: 24px;
-	background: rgba(42, 32, 28, 0.94);
-	border: 1px solid rgba(204, 184, 165, 0.85);
-	border-radius: 7px;
-}
-
-.mode-select-panel {
-	width: min(760px, 100%);
-	display: grid;
-	gap: 18px;
-	justify-items: center;
-	text-align: center;
-	padding: 0;
-}
-
-.mode-select-heading {
-	margin: 0;
-	color: rgba(255, 244, 230, 0.72);
-	font-family: "Avenir Next Condensed", "Trebuchet MS", sans-serif;
-	font-size: clamp(45px, 2.2vw, 55px);
-	font-weight: 700;
-	letter-spacing: 0.22em;
-	line-height: 1;
-	text-transform: uppercase;
-	transform: translateY(-20px);
-}
-
-.mode-select-overlay[hidden],
 .game-over-controls[hidden] {
 	display: none;
 }
 
-.mode-select-actions {
-	display: grid;
-	grid-template-columns: repeat(2, minmax(0, 1fr));
-	gap: 28px;
-	align-items: center;
-	width: 100%;
-}
-
-.mode-button,
 .overlay-action-button {
 	appearance: none;
 	border: 1px solid var(--line);
@@ -174,81 +133,10 @@ body {
 	transition: background 120ms ease, border-color 120ms ease;
 }
 
-.mode-button {
-	display: block;
-}
-
-.mode-button:hover,
 .overlay-action-button:hover {
 	border-color: #b89c82;
 	background-color: #f3eadf;
 	background-image: none;
-}
-
-.mode-choice {
-	min-height: 112px;
-	padding: 16px 18px 15px;
-	border: 2px solid #101010;
-	border-radius: 0;
-	box-shadow: none;
-	transition: transform 120ms ease, filter 120ms ease, box-shadow 120ms ease;
-	text-align: left;
-}
-
-.mode-choice:hover {
-	transform: scale(1.03);
-	filter: brightness(1.2);
-	border-color: #101010;
-}
-
-.mode-choice:focus-visible {
-	outline: 3px solid #fff4e6;
-	outline-offset: 5px;
-}
-
-.mode-choice-short {
-	background: #101010;
-	color: #ff6c5c;
-}
-
-.mode-choice-short:hover,
-.mode-choice-short:focus-visible {
-	background: #101010;
-	color: #ff6c5c;
-}
-
-.mode-choice-long {
-	background: #d74738;
-	color: #101010;
-}
-
-.mode-choice-long:hover,
-.mode-choice-long:focus-visible {
-	background: #d74738;
-	color: #101010;
-}
-
-.mode-choice-title,
-.mode-choice-subtitle {
-	display: block;
-}
-
-.mode-choice-title {
-	font-family: "Avenir Next Condensed", "Trebuchet MS", sans-serif;
-	font-size: clamp(24px, 2.8vw, 31px);
-	font-weight: 800;
-	line-height: 1.05;
-	letter-spacing: 0.2em;
-	text-transform: uppercase;
-}
-
-.mode-choice-subtitle {
-	margin-top: 8px;
-	font-family: "Avenir Next Condensed", "Trebuchet MS", sans-serif;
-	font-size: clamp(16px, 1.6vw, 19px);
-	font-weight: 700;
-	letter-spacing: 0.2em;
-	line-height: 1.2;
 }
 
 .game-over-controls {
@@ -295,15 +183,6 @@ body {
 
 	.status-bar {
 		font-size: 12px;
-	}
-
-	.mode-select-actions {
-		grid-template-columns: 1fr;
-	}
-
-	.mode-choice {
-		min-height: 104px;
-		padding: 14px 16px;
 	}
 
 	.game-over-controls {
